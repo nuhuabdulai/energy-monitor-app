@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.db-journal
+test_app.py
+.venv/
+venv/
+.env
+.git/

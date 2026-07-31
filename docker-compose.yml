@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  energy-monitor:
+    build: .
+    container_name: energy-monitor
+    ports:
+      - "5000:5000"
+    environment:
+      # Credentials / pricing can be tuned here
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - ENERGY_RATE=${ENERGY_RATE:-0.80}
+      - CURRENCY_SYMBOL=${CURRENCY_SYMBOL:-GH₵}
+      - SIM_INTERVAL=${SIM_INTERVAL:-3}
+      - RETENTION_DAYS=${RETENTION_DAYS:-30}
+      - ENERGY_DB_PATH=/app/data/energy.db
+      - HOST=0.0.0.0
+    volumes:
+      - energy-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  energy-data:

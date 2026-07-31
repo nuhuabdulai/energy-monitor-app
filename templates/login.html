@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign In — Smart Energy Monitor</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; background:#0f172a; color:#e2e8f0; min-height:100vh; display:flex; align-items:center; justify-content:center; }
+    .auth-box { background:#1e293b; border-radius:16px; padding:40px; width:100%; max-width:400px; border:1px solid #334155; }
+    h2 { text-align:center; margin-bottom:8px; font-size:1.5rem; }
+    .sub { text-align:center; color:#94a3b8; font-size:0.9rem; margin-bottom:24px; }
+    .form-group { margin-bottom:16px; }
+    label { display:flex; justify-content:space-between; font-size:0.85rem; color:#94a3b8; margin-bottom:6px; }
+    .input-wrap { position:relative; }
+    input { width:100%; padding:12px 14px; border-radius:8px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:0.95rem; outline:none; transition:border 0.2s; }
+    input:focus { border-color:#3b82f6; }
+    input.error { border-color:#ef4444; }
+    .toggle-pw { position:absolute; right:12px; top:50%; transform:translateY(-50%); background:none; border:none; color:#64748b; cursor:pointer; font-size:0.85rem; padding:4px; }
+    .toggle-pw:hover { color:#94a3b8; }
+    .btn { width:100%; padding:12px; border-radius:8px; font-size:1rem; font-weight:600; border:none; cursor:pointer; transition:all 0.2s; display:flex; align-items:center; justify-content:center; gap:8px; }
+    .btn-primary { background:#3b82f6; color:#fff; }
+    .btn-primary:hover:not(:disabled) { background:#2563eb; }
+    .btn:disabled { opacity:0.6; cursor:not-allowed; }
+    .btn .spinner { display:none; width:16px; height:16px; border:2px solid rgba(255,255,255,0.3); border-top-color:#fff; border-radius:50%; animation:spin 0.6s linear infinite; }
+    .btn.loading .spinner { display:inline-block; }
+    .btn.loading .btn-text { opacity:0.7; }
+    .error { color:#ef4444; font-size:0.85rem; margin-top:8px; text-align:center; min-height:1.2em; transition:opacity 0.2s; }
+    .field-error { color:#ef4444; font-size:0.75rem; margin-top:4px; display:none; }
+    .link { text-align:center; margin-top:16px; font-size:0.85rem; color:#94a3b8; }
+    .link a { color:#38bdf8; text-decoration:none; }
+    .link a:hover { text-decoration:underline; }
+    @media (max-width:480px) {
+      body { padding:16px; }
+      .auth-box { padding:28px 20px; border-radius:12px; }
+      /* 16px prevents iOS Safari auto-zoom when focusing an input */
+      input { font-size:16px; }
+    }
+    @keyframes spin { to { transform:rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="auth-box">
+    <h2>Welcome Back</h2>
+    <p class="sub">Sign in to your energy dashboard</p>
+    <form id="loginForm" novalidate>
+      <div class="form-group">
+        <label for="email">Email</label>
+        <div class="input-wrap">
+          <input type="email" id="email" placeholder="you@example.com" required autocomplete="email">
+        </div>
+        <div class="field-error" id="emailError">Please enter a valid email</div>
+      </div>
+      <div class="form-group">
+        <label for="password">Password</label>
+        <div class="input-wrap">
+          <input type="password" id="password" placeholder="Enter your password" required autocomplete="current-password" minlength="6">
+          <button type="button" class="toggle-pw" id="togglePw" tabindex="-1">Show</button>
+        </div>
+        <div class="field-error" id="pwError">Password must be at least 6 characters</div>
+      </div>
+      <button type="submit" class="btn btn-primary" id="loginBtn">
+        <span class="spinner"></span>
+        <span class="btn-text">Sign In</span>
+      </button>
+      <div class="error" id="loginError"></div>
+    </form>
+    <div class="link">Don't have an account? <a href="/signup">Create one</a></div>
+  </div>
+  <script>
+    const $ = id => document.getElementById(id);
+    const form = $('loginForm');
+    const email = $('email');
+    const password = $('password');
+    const btn = $('loginBtn');
+    const err = $('loginError');
+    const emailErr = $('emailError');
+    const pwErr = $('pwError');
+
+    // Auto-redirect if already logged in
+    (async () => {
+      try {
+        const res = await fetch('/api/me');
+        if (res.ok) window.location.href = '/dashboard';
+      } catch(e) {}
+    })();
+
+    // Password show/hide
+    $('togglePw').addEventListener('click', () => {
+      const isPw = password.type === 'password';
+      password.type = isPw ? 'text' : 'password';
+      $('togglePw').textContent = isPw ? 'Hide' : 'Show';
+    });
+
+    // Real-time field validation
+    email.addEventListener('blur', () => {
+      const valid = email.value.trim() && email.validity.valid;
+      email.classList.toggle('error', !valid && email.value !== '');
+      emailErr.style.display = (!valid && email.value !== '') ? 'block' : 'none';
+    });
+    password.addEventListener('blur', () => {
+      const valid = password.value.length >= 6;
+      password.classList.toggle('error', !valid && password.value !== '');
+      pwErr.style.display = (!valid && password.value !== '') ? 'block' : 'none';
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      btn.classList.add('loading');
+      btn.disabled = true;
+
+      const emailVal = email.value.trim().toLowerCase();
+      const pwVal = password.value;
+
+      if (!emailVal || !email.validity.valid) {
+        err.textContent = 'Please enter a valid email address';
+        btn.classList.remove('loading');
+        btn.disabled = false;
+        email.focus();
+        return;
+      }
+      if (pwVal.length < 6) {
+        err.textContent = 'Password must be at least 6 characters';
+        btn.classList.remove('loading');
+        btn.disabled = false;
+        password.focus();
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ email: emailVal, password: pwVal })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          err.textContent = data.error || 'Invalid email or password';
+          btn.classList.remove('loading');
+          btn.disabled = false;
+          return;
+        }
+        window.location.href = '/dashboard';
+      } catch(e) {
+        err.textContent = 'Connection error. Is the server running?';
+        btn.classList.remove('loading');
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

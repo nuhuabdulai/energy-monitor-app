@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard — Smart Energy Monitor</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --bg-2: #1e293b;
+      --bg-3: #0b1220;
+      --border: #334155;
+      --text: #e2e8f0;
+      --text-dim: #94a3b8;
+      --text-faint: #64748b;
+      --accent: #3b82f6;
+      --accent-2: #2563eb;
+      --green: #22c55e;
+      --yellow: #eab308;
+      --red: #ef4444;
+      --shadow: rgba(0,0,0,0.4);
+    }
+    body[data-theme="light"] {
+      --bg: #f1f5f9;
+      --bg-2: #ffffff;
+      --bg-3: #e2e8f0;
+      --border: #cbd5e1;
+      --text: #0f172a;
+      --text-dim: #475569;
+      --text-faint: #64748b;
+      --shadow: rgba(15,23,42,0.1);
+    }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; transition:background 0.25s,color 0.25s; }
+    .app { display:flex; min-height:100vh; }
+
+    /* Sidebar */
+    .sidebar { width:230px; background:var(--bg-2); border-right:1px solid var(--border); padding:20px 0; flex-shrink:0; display:flex; flex-direction:column; transition:transform 0.25s; z-index:40; }
+    .sidebar h3 { padding:0 20px; font-size:1rem; color:#38bdf8; margin-bottom:20px; }
+    .sidebar a.nav { display:flex; align-items:center; gap:10px; padding:11px 20px; color:var(--text-dim); text-decoration:none; font-size:0.9rem; transition:all 0.15s; border-left:3px solid transparent; cursor:pointer; }
+    .sidebar a.nav:hover, .sidebar a.nav.active { background:var(--bg); color:var(--text); border-left-color:var(--accent); }
+    .sidebar .user-info { padding:12px 20px; border-top:1px solid var(--border); margin-top:auto; font-size:0.8rem; color:var(--text-faint); }
+    .sidebar .user-info a { color:var(--red); font-size:0.8rem; text-decoration:none; display:inline-block; margin-top:4px; }
+    .theme-toggle { display:flex; align-items:center; gap:8px; margin:8px 20px; padding:8px 10px; border:1px solid var(--border); border-radius:8px; background:transparent; color:var(--text-dim); font-size:0.8rem; cursor:pointer; }
+    .theme-toggle:hover { border-color:var(--accent); color:var(--text); }
+
+    .main { flex:1; display:flex; flex-direction:column; min-width:0; }
+    .topbar { display:flex; align-items:center; gap:12px; padding:12px 24px; background:var(--bg-2); border-bottom:1px solid var(--border); position:sticky; top:0; z-index:30; }
+    .topbar h2 { font-size:1.15rem; }
+    .topbar .spacer { flex:1; }
+    .hamburger { display:none; background:none; border:1px solid var(--border); color:var(--text); border-radius:8px; padding:6px 10px; font-size:1rem; cursor:pointer; }
+    .live-indicator { display:flex; align-items:center; gap:6px; font-size:0.8rem; color:var(--green); }
+    .content { padding:24px; flex:1; overflow-y:auto; }
+    .page { display:none; }
+    .page.active { display:block; }
+
+    /* Stats cards */
+    .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:14px; margin-bottom:20px; }
+    .stat-card { background:var(--bg-2); border-radius:12px; padding:18px; border:1px solid var(--border); box-shadow:0 1px 3px var(--shadow); }
+    .stat-card .label { color:var(--text-dim); font-size:0.75rem; text-transform:uppercase; letter-spacing:0.5px; }
+    .stat-card .value { font-size:1.6rem; font-weight:700; margin-top:4px; }
+    .stat-card .value.green { color:var(--green); }
+    .stat-card .value.blue { color:var(--accent); }
+    .stat-card .value.yellow { color:var(--yellow); }
+    .stat-card .value.red { color:var(--red); }
+
+    /* Chart controls */
+    .chart-toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+    .device-select { background:var(--bg-2); border:1px solid var(--border); color:var(--text); padding:8px 12px; border-radius:8px; font-size:0.9rem; }
+    .device-select:focus { outline:none; border-color:var(--accent); }
+    .range-toggle { display:flex; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+    .range-toggle button { padding:8px 14px; background:var(--bg-2); color:var(--text-dim); border:none; font-size:0.85rem; cursor:pointer; }
+    .range-toggle button.active { background:var(--accent); color:#fff; }
+
+    /* Charts */
+    .chart-container { background:var(--bg-2); border-radius:12px; padding:18px; border:1px solid var(--border); box-shadow:0 1px 3px var(--shadow); }
+    .chart-container h3 { font-size:0.95rem; margin-bottom:12px; color:var(--text-dim); }
+    .chart-wrapper { height:260px; }
+    .overview-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; }
+    .insights-grid { display:grid; grid-template-columns:2fr 1fr; gap:16px; margin-bottom:16px; }
+    @media (max-width:1100px) { .overview-grid, .insights-grid { grid-template-columns:1fr; } }
+
+    /* Ranking */
+    .rank-list { display:flex; flex-direction:column; gap:10px; }
+    .rank-item { display:flex; flex-direction:column; gap:4px; }
+    .rank-top { display:flex; justify-content:space-between; font-size:0.85rem; }
+    .rank-top .rn { color:var(--text-dim); font-weight:600; width:20px; }
+    .rank-top .rname { flex:1; }
+    .rank-top .renergy { color:var(--text); font-weight:600; }
+    .rank-top .rcost { color:var(--text-faint); font-size:0.75rem; width:70px; text-align:right; }
+    .rank-bar { height:8px; border-radius:4px; background:var(--bg-3); overflow:hidden; }
+    .rank-bar > div { height:100%; border-radius:4px; background:var(--accent); transition:width 0.4s; }
+
+    /* Device cards */
+    .device-toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px; }
+    .btn { padding:9px 16px; border-radius:8px; font-size:0.85rem; font-weight:600; border:1px solid var(--accent); background:transparent; color:var(--accent); cursor:pointer; transition:all 0.15s; }
+    .btn:hover { background:var(--accent); color:#fff; }
+    .btn-primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .btn-primary:hover { background:var(--accent-2); }
+    .btn-danger { border-color:var(--red); color:var(--red); }
+    .btn-danger:hover { background:var(--red); color:#fff; }
+    .device-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:14px; }
+    .device-card { background:var(--bg-2); border-radius:12px; padding:16px; border:1px solid var(--border); transition:border 0.2s, box-shadow 0.2s; box-shadow:0 1px 3px var(--shadow); }
+    .device-card:hover { border-color:var(--accent); }
+    .device-card .dhead { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px; gap:8px; }
+    .device-card .dhead h4 { font-size:0.95rem; word-break:break-word; }
+    .device-card .dhead .loc { color:var(--text-faint); font-size:0.8rem; }
+    .device-card .dbody { display:grid; grid-template-columns:1fr 1fr; gap:6px; font-size:0.85rem; }
+    .device-card .dbody .m { color:var(--text-dim); }
+    .device-card .dbody .v { color:var(--text); font-weight:500; text-align:right; }
+    .alert-badge { display:inline-block; background:var(--red); color:#fff; font-size:0.7rem; padding:2px 8px; border-radius:10px; margin-left:6px; }
+    .status-dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:6px; }
+    .status-dot.online { background:var(--green); }
+    .status-dot.offline { background:var(--red); }
+    .device-actions { display:flex; gap:6px; margin-top:12px; flex-wrap:wrap; }
+    .device-actions button { padding:5px 10px; border-radius:6px; border:1px solid var(--border); background:transparent; color:var(--text-dim); font-size:0.75rem; cursor:pointer; }
+    .device-actions button:hover { border-color:var(--accent); color:var(--text); }
+    .device-actions button.off:hover { border-color:var(--yellow); color:var(--yellow); }
+    .device-actions button.del:hover { border-color:var(--red); color:var(--red); }
+
+    /* Alerts */
+    .alert-table { width:100%; border-collapse:collapse; }
+    .alert-table th { text-align:left; padding:10px 12px; color:var(--text-dim); font-size:0.75rem; text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid var(--border); white-space:nowrap; }
+    .alert-table td { padding:10px 12px; border-bottom:1px solid var(--bg-3); font-size:0.85rem; }
+    .alert-table tr:hover { background:var(--bg-2); }
+    .severity-critical { color:var(--red); font-weight:600; }
+    .severity-warning { color:var(--yellow); font-weight:600; }
+    .ack-btn { padding:4px 12px; border-radius:6px; border:1px solid var(--accent); background:transparent; color:var(--accent); font-size:0.8rem; cursor:pointer; }
+    .ack-btn:hover { background:var(--accent); color:#fff; }
+    .table-wrap { background:var(--bg-2); border-radius:12px; border:1px solid var(--border); overflow-x:auto; box-shadow:0 1px 3px var(--shadow); }
+    .th-input { width:88px; padding:7px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:0.82rem; outline:none; }
+    .th-input:focus { border-color:var(--accent); }
+
+    /* Modal */
+    .modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:100; align-items:center; justify-content:center; padding:16px; }
+    .modal-backdrop.open { display:flex; }
+    .modal { background:var(--bg-2); border:1px solid var(--border); border-radius:14px; padding:24px; width:100%; max-width:420px; box-shadow:0 10px 40px var(--shadow); }
+    .modal h3 { margin-bottom:16px; }
+    .modal .form-group { margin-bottom:14px; }
+    .modal label { display:block; font-size:0.82rem; color:var(--text-dim); margin-bottom:6px; }
+    .modal input, .modal select { width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:0.9rem; outline:none; }
+    .modal input:focus, .modal select:focus { border-color:var(--accent); }
+    .modal .form-row { display:flex; gap:10px; align-items:center; }
+    .modal .form-row input[type="checkbox"] { width:auto; }
+    .modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:18px; }
+
+    /* Toasts */
+    .toast-container { position:fixed; top:70px; right:16px; z-index:200; display:flex; flex-direction:column; gap:10px; max-width:340px; }
+    .toast { background:var(--bg-2); border:1px solid var(--border); border-left:4px solid var(--yellow); border-radius:10px; padding:12px 14px; box-shadow:0 4px 16px var(--shadow); animation:toast-in 0.25s ease; }
+    .toast.critical { border-left-color:var(--red); }
+    .toast .toast-title { font-weight:700; font-size:0.9rem; margin-bottom:3px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
+    .toast.critical .toast-title { color:var(--red); }
+    .toast .toast-msg { font-size:0.82rem; color:var(--text-dim); }
+    .toast .toast-close { background:none; border:none; color:var(--text-faint); font-size:1.1rem; cursor:pointer; line-height:1; }
+    .toast .toast-close:hover { color:var(--text); }
+    @keyframes toast-in { from { opacity:0; transform:translateX(20px); } to { opacity:1; transform:none; } }
+
+    /* Mobile sidebar backdrop */
+    .backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:35; }
+    .backdrop.show { display:block; }
+
+    @media (max-width:768px) {
+      .sidebar { position:fixed; top:0; left:0; bottom:0; width:230px; transform:translateX(-100%); }
+      .sidebar.open { transform:none; }
+      .hamburger { display:inline-block; }
+      .content { padding:14px; }
+      .stats { grid-template-columns:repeat(2,1fr); }
+      .device-grid { grid-template-columns:1fr; }
+      .topbar { padding:10px 14px; }
+      .toast-container { left:14px; right:14px; max-width:none; top:64px; }
+      .overview-grid { grid-template-columns:1fr; }
+    }
+    @media (max-width:420px) {
+      .stats { grid-template-columns:1fr; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <nav class="sidebar" id="sidebar">
+    <h3>⚡ Energy Monitor</h3>
+    <a class="nav active" data-page="overview"><span>📊</span><span>Overview</span></a>
+    <a class="nav" data-page="devices"><span>📱</span><span>Devices</span></a>
+    <a class="nav" data-page="alerts"><span>🔔</span><span>Alerts</span></a>
+    <a class="nav" data-page="settings"><span>⚙️</span><span>Settings</span></a>
+    <a class="nav" href="/map"><span>📍</span><span>Device Map</span></a>
+    <button class="theme-toggle" id="themeToggle">🌓 <span id="themeLabel">Dark</span></button>
+    <div class="user-info">
+      <div id="userName">{{ user_name }}</div>
+      <a href="#" id="logoutBtn">Sign out</a>
+    </div>
+  </nav>
+
+  <div class="main">
+    <div class="topbar">
+      <button class="hamburger" id="hamburger" aria-label="Menu">☰</button>
+      <h2 id="pageTitle">Overview</h2>
+      <div class="spacer"></div>
+      <div class="live-indicator">
+        <span style="width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 1.5s infinite;"></span>
+        Live
+      </div>
+    </div>
+
+    <div class="content">
+      <!-- Overview Page -->
+      <div class="page active" id="pageOverview">
+        <div class="stats" id="statsContainer">
+          <div class="stat-card"><div class="label">Total Energy (24h)</div><div class="value blue" id="statEnergy">-- kWh</div></div>
+          <div class="stat-card"><div class="label">Est. Cost (24h)</div><div class="value yellow" id="statCost">--</div></div>
+          <div class="stat-card"><div class="label">Peak Power (24h)</div><div class="value blue" id="statPeak">-- W</div></div>
+          <div class="stat-card"><div class="label">Avg Power (1h)</div><div class="value yellow" id="statPower">-- W</div></div>
+          <div class="stat-card"><div class="label">Active Devices</div><div class="value green" id="statDevices">--</div></div>
+          <div class="stat-card"><div class="label">Offline Devices</div><div class="value red" id="statOffline">--</div></div>
+          <div class="stat-card"><div class="label">Active Alerts</div><div class="value red" id="statAlerts">--</div></div>
+        </div>
+
+        <div class="chart-toolbar">
+          <select id="chartDevice" class="device-select"></select>
+          <div class="range-toggle" id="rangeToggle">
+            <button data-hours="24" class="active">24H</button>
+            <button data-hours="168">7D</button>
+          </div>
+        </div>
+        <div class="overview-grid">
+          <div class="chart-container">
+            <h3>Power Consumption</h3>
+            <div class="chart-wrapper"><canvas id="powerChart"></canvas></div>
+          </div>
+          <div class="chart-container">
+            <h3>Voltage Trend</h3>
+            <div class="chart-wrapper"><canvas id="voltageChart"></canvas></div>
+          </div>
+          <div class="chart-container">
+            <h3>Temperature Trend</h3>
+            <div class="chart-wrapper"><canvas id="tempChart"></canvas></div>
+          </div>
+          <div class="chart-container">
+            <h3>Humidity Trend</h3>
+            <div class="chart-wrapper"><canvas id="humidityChart"></canvas></div>
+          </div>
+        </div>
+        <div class="insights-grid">
+          <div class="chart-container">
+            <h3>Daily Energy Consumption (7 days)</h3>
+            <div class="chart-wrapper"><canvas id="trendChart"></canvas></div>
+          </div>
+          <div class="chart-container">
+            <h3>Top Consumers (24h)</h3>
+            <div class="rank-list" id="rankList"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Devices Page -->
+      <div class="page" id="pageDevices">
+        <div class="device-toolbar">
+          <button class="btn btn-primary" id="addDeviceBtn">+ Add Device</button>
+          <button class="btn" id="exportReadingsBtn">Export Readings (CSV)</button>
+          <input type="search" id="deviceSearch" class="device-select" placeholder="Search devices..." style="min-width:200px;">
+          <select id="deviceSort" class="device-select">
+            <option value="name">Sort: Name</option>
+            <option value="power">Sort: Power (high→low)</option>
+            <option value="energy">Sort: Energy (high→low)</option>
+            <option value="alerts">Sort: Alerts</option>
+            <option value="location">Sort: Location</option>
+          </select>
+          <span style="color:var(--text-faint);font-size:0.85rem;align-self:center;" id="deviceCount"></span>
+        </div>
+        <div class="device-grid" id="deviceGrid"></div>
+      </div>
+
+      <!-- Alerts Page -->
+      <div class="page" id="pageAlerts">
+        <div class="device-toolbar">
+          <select id="alertFilter" class="device-select">
+            <option value="all">All Devices</option>
+          </select>
+          <button class="btn" id="exportAlertsBtn">Export Alerts (CSV)</button>
+          <button class="btn" id="ackAllBtn">✓ Acknowledge All</button>
+          <span style="color:var(--text-faint);font-size:0.85rem;align-self:center;" id="alertCount">0 active alerts</span>
+        </div>
+        <div class="table-wrap">
+          <table class="alert-table">
+            <thead><tr><th>Time</th><th>Device</th><th>Type</th><th>Value</th><th>Threshold</th><th>Message</th><th>Severity</th><th>Action</th></tr></thead>
+            <tbody id="alertBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Settings Page -->
+      <div class="page" id="pageSettings">
+        <div class="chart-container" style="margin-bottom:16px;">
+          <h3>Billing &amp; Global Settings</h3>
+          <div class="form-row" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;">
+            <div class="form-group" style="margin:0;min-width:180px;">
+              <label for="setRate" style="display:block;font-size:0.82rem;color:var(--text-dim);margin-bottom:6px;">Energy Rate (per kWh)</label>
+              <input type="number" id="setRate" step="0.01" min="0" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);outline:none;">
+            </div>
+            <div class="form-group" style="margin:0;min-width:180px;">
+              <label for="setCurrency" style="display:block;font-size:0.82rem;color:var(--text-dim);margin-bottom:6px;">Currency Symbol</label>
+              <input type="text" id="setCurrency" maxlength="16" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);outline:none;">
+            </div>
+            <div style="align-self:flex-end;">
+              <button class="btn btn-primary" id="saveGlobalBtn">Save</button>
+            </div>
+          </div>
+          <div id="setGlobalMsg" style="color:var(--green);font-size:0.82rem;margin-top:10px;"></div>
+        </div>
+
+        <div class="chart-container">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px;">
+            <h3 style="margin:0;">Alert Thresholds per Device</h3>
+            <div style="display:flex;gap:8px;">
+              <button class="btn" id="resetThresholdsBtn">Reset All to Defaults</button>
+              <button class="btn btn-primary" id="saveThresholdsBtn">Save Thresholds</button>
+            </div>
+          </div>
+          <div id="setThresholdMsg" style="color:var(--green);font-size:0.82rem;margin-bottom:10px;"></div>
+          <div class="table-wrap" style="box-shadow:none;">
+            <table class="alert-table" style="min-width:860px;">
+              <thead>
+                <tr>
+                  <th>Device</th>
+                  <th>Power (W)</th>
+                  <th>V min</th>
+                  <th>V max</th>
+                  <th>Current (A)</th>
+                  <th>Temp min (°C)</th>
+                  <th>Temp max (°C)</th>
+                </tr>
+              </thead>
+              <tbody id="thresholdBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Device modal -->
+<div class="modal-backdrop" id="deviceModal">
+  <div class="modal">
+    <h3 id="deviceModalTitle">Add Device</h3>
+    <div class="form-group">
+      <label>Device Name</label>
+      <input type="text" id="dmName" placeholder="e.g. Kitchen Meter">
+    </div>
+    <div class="form-group">
+      <label>Location</label>
+      <input type="text" id="dmLocation" placeholder="e.g. Kitchen">
+    </div>
+    <div class="form-group">
+      <label>Device Type</label>
+      <select id="dmType">
+        <option value="smart_meter">Smart Meter</option>
+        <option value="plug">Smart Plug</option>
+        <option value="breaker">Circuit Breaker</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <div class="form-row">
+        <input type="checkbox" id="dmActive" checked>
+        <label for="dmActive" style="margin:0;">Active</label>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="dmCancel">Cancel</button>
+      <button class="btn btn-primary" id="dmSave">Save</button>
+    </div>
+    <div class="error" id="dmError" style="color:var(--red);font-size:0.82rem;margin-top:10px;"></div>
+  </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+<div class="backdrop" id="backdrop"></div>
+
+<style>
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+</style>
+
+<script>
+// ---------- socket ----------
+const socket = io();
+
+// ---------- state ----------
+let powerChartInstance = null;
+let voltageChartInstance = null;
+let tempChartInstance = null;
+let humidityChartInstance = null;
+let trendChartInstance = null;
+let allDevices = [];
+let allAlerts = [];
+let chartDeviceId = 'all';
+let chartHours = 24;
+let editDeviceId = null;
+let lastChartReload = 0;
+
+// ---------- helpers ----------
+const $ = id => document.getElementById(id);
+const qq = (sel, ctx) => (ctx||document).querySelectorAll(sel);
+const q = (sel, ctx) => (ctx||document).querySelector(sel);
+const fnum = (n, d) => { if (n===undefined||n===null) return '--'; return Number(n).toFixed(d); };
+const cssVar = name => getComputedStyle(document.body).getPropertyValue(name).trim();
+// HTML-escape user-controlled values before injecting into innerHTML (XSS-safe)
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+));
+
+// ---------- theme ----------
+function applyTheme(theme) {
+  document.body.setAttribute('data-theme', theme);
+  localStorage.setItem('energy_theme', theme);
+  $('themeLabel').textContent = theme === 'light' ? 'Light' : 'Dark';
+  if (powerChartInstance) loadChartData();
+}
+$('themeToggle').addEventListener('click', () => {
+  const next = document.body.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+  applyTheme(next);
+});
+applyTheme(localStorage.getItem('energy_theme') || 'dark');
+
+// ---------- mobile sidebar ----------
+function closeSidebar() {
+  $('sidebar').classList.remove('open');
+  $('backdrop').classList.remove('show');
+}
+$('hamburger').addEventListener('click', () => {
+  $('sidebar').classList.toggle('open');
+  $('backdrop').classList.toggle('show');
+});
+$('backdrop').addEventListener('click', closeSidebar);
+
+// ---------- page nav ----------
+function switchPage(page) {
+  qq('.sidebar a.nav').forEach(x => x.classList.remove('active'));
+  const link = q(`.sidebar a.nav[data-page="${page}"]`);
+  if (link) link.classList.add('active');
+  qq('.page').forEach(p => p.classList.remove('active'));
+  const target = $('page' + page.charAt(0).toUpperCase() + page.slice(1));
+  if (target) target.classList.add('active');
+  $('pageTitle').textContent = (link ? link.textContent.trim() : 'Dashboard');
+  closeSidebar();
+}
+qq('.sidebar a.nav[data-page]').forEach(a => {
+  a.addEventListener('click', e => {
+    e.preventDefault();
+    switchPage(a.getAttribute('data-page'));
+  });
+});
+// deep-link to a page (used by the Device Map sidebar links)
+const urlPage = new URLSearchParams(window.location.search).get('page');
+if (urlPage) switchPage(urlPage);
+
+// ---------- logout ----------
+$('logoutBtn').addEventListener('click', async e => {
+  e.preventDefault();
+  await fetch('/api/logout', { method:'POST' });
+  window.location.href = '/login';
+});
+
+// ---------- summary ----------
+async function loadSummary() {
+  try {
+    const res = await fetch('/api/summary');
+    const data = await res.json();
+    $('statEnergy').textContent = fnum(data.total_energy_kwh, 2) + ' kWh';
+    $('statCost').textContent = data.currency + ' ' + fnum(data.daily_cost, 2);
+    $('statPeak').textContent = fnum(data.peak_power_w, 0) + ' W';
+    $('statDevices').textContent = data.active_devices;
+    $('statOffline').textContent = data.offline_devices || 0;
+    $('statAlerts').textContent = data.active_alerts;
+    $('statPower').textContent = fnum(data.avg_power_w, 1) + ' W';
+    $('alertCount').textContent = data.active_alerts + ' active alerts';
+  } catch(e) {}
+}
+
+// ---------- devices ----------
+async function loadDevices() {
+  try {
+    const res = await fetch('/api/devices');
+    allDevices = await res.json();
+    renderDevices(allDevices);
+    populateAlertFilter(allDevices);
+    populateChartDevice(allDevices);
+    $('deviceCount').textContent = allDevices.length + ' device' + (allDevices.length===1?'':'s');
+  } catch(e) {}
+}
+
+function renderDevices(devices) {
+  const grid = $('deviceGrid');
+  grid.innerHTML = devices.map(d => {
+    const hasAlert = d.alert_count > 0;
+    const lastSeen = d.last_reading ? Math.max(0, Math.round((Date.now() - new Date(d.last_reading).getTime()) / 1000)) : null;
+    const offline = lastSeen !== null && lastSeen > 30;
+    return `<div class="device-card" data-id="${d.id}">
+      <div class="dhead">
+        <div>
+          <h4>${esc(d.name)}</h4>
+          <span class="loc">${esc(d.location)}</span>
+          ${hasAlert ? `<span class="alert-badge">${d.alert_count}</span>` : ''}
+        </div>
+        <div><span class="status-dot ${d.is_active ? (offline ? 'offline' : 'online') : 'offline'}"></span></div>
+      </div>
+      <div class="dbody">
+        <span class="m">Voltage</span><span class="v">${fnum(d.voltage,1)} V</span>
+        <span class="m">Current</span><span class="v">${fnum(d.current,2)} A</span>
+        <span class="m">Power</span><span class="v">${fnum(d.power,1)} W</span>
+        <span class="m">Energy</span><span class="v">${fnum(d.energy,3)} kWh</span>
+        <span class="m">Power Factor</span><span class="v">${fnum(d.power_factor,2)}</span>
+        <span class="m">Frequency</span><span class="v">${fnum(d.frequency,2)} Hz</span>
+        <span class="m">Temperature</span><span class="v">${fnum(d.temperature,1)} °C</span>
+        <span class="m">Humidity</span><span class="v">${fnum(d.humidity,0)}%</span>
+      </div>
+      ${lastSeen !== null ? `<div style="font-size:0.72rem;color:var(--text-faint);margin-top:8px;">Last reading: ${lastSeen}s ago</div>` : ''}
+      <div class="device-actions">
+        <button class="toggle" data-id="${d.id}" data-active="${d.is_active}">${d.is_active ? 'Disable' : 'Enable'}</button>
+        <button class="edit" data-id="${d.id}">Edit</button>
+        <button class="del" data-id="${d.id}">Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+  // bind actions
+  qq('.device-actions .toggle').forEach(b => b.addEventListener('click', () => toggleDevice(b)));
+  qq('.device-actions .edit').forEach(b => b.addEventListener('click', () => openEditDevice(b.getAttribute('data-id'))));
+  qq('.device-actions .del').forEach(b => b.addEventListener('click', () => deleteDevice(b.getAttribute('data-id'))));
+}
+
+// ---------- device search & sort ----------
+function filteredDevices() {
+  const term = $('deviceSearch').value.trim().toLowerCase();
+  const sort = $('deviceSort').value;
+  let list = allDevices;
+  if (term) {
+    list = list.filter(d => (d.name || '').toLowerCase().includes(term) ||
+      (d.location || '').toLowerCase().includes(term));
+  }
+  const cmp = {
+    'name': (a,b) => a.name.localeCompare(b.name),
+    'location': (a,b) => (a.location||'').localeCompare(b.location||''),
+    'power': (a,b) => (b.power||0) - (a.power||0),
+    'energy': (a,b) => (b.energy||0) - (a.energy||0),
+    'alerts': (a,b) => (b.alert_count||0) - (a.alert_count||0)
+  }[sort] || ((a,b) => 0);
+  return [...list].sort(cmp);
+}
+$('deviceSearch').addEventListener('input', () => renderDevices(filteredDevices()));
+$('deviceSort').addEventListener('change', () => renderDevices(filteredDevices()));
+
+function populateChartDevice(devices) {
+  const sel = $('chartDevice');
+  const current = chartDeviceId;
+  sel.innerHTML = '<option value="all">All Devices</option>' +
+    devices.map(d => `<option value="${d.id}">${d.name}</option>`).join('');
+  sel.value = current;
+  sel.onchange = () => { chartDeviceId = sel.value; loadChartData(); };
+}
+
+// ---------- device management ----------
+function openModal(device) {
+  editDeviceId = device ? device.id : null;
+  $('deviceModalTitle').textContent = device ? 'Edit Device' : 'Add Device';
+  $('dmName').value = device ? device.name : '';
+  $('dmLocation').value = device ? device.location : '';
+  $('dmType').value = device ? (device.device_type || 'smart_meter') : 'smart_meter';
+  $('dmActive').checked = device ? device.is_active : true;
+  $('dmError').textContent = '';
+  $('deviceModal').classList.add('open');
+}
+$('addDeviceBtn').addEventListener('click', () => openModal(null));
+$('dmCancel').addEventListener('click', () => $('deviceModal').classList.remove('open'));
+$('dmSave').addEventListener('click', async () => {
+  const name = $('dmName').value.trim();
+  const location = $('dmLocation').value.trim();
+  const payload = { name, location, device_type: $('dmType').value, is_active: $('dmActive').checked };
+  if (!name) { $('dmError').textContent = 'Device name is required'; return; }
+  const method = editDeviceId ? 'PUT' : 'POST';
+  const url = editDeviceId ? `/api/devices/${editDeviceId}` : '/api/devices';
+  const res = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+  if (!res.ok) {
+    const data = await res.json();
+    $('dmError').textContent = data.error || 'Failed to save device';
+    return;
+  }
+  $('deviceModal').classList.remove('open');
+  loadDevices();
+  loadSummary();
+});
+
+async function toggleDevice(btn) {
+  const id = parseInt(btn.getAttribute('data-id'));
+  const active = btn.getAttribute('data-active') === 'true';
+  await fetch(`/api/devices/${id}`, {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ is_active: !active })
+  });
+  loadDevices();
+}
+
+function openEditDevice(id) {
+  const dev = allDevices.find(d => d.id == id);
+  if (dev) openModal(dev);
+}
+
+async function deleteDevice(id) {
+  if (!confirm('Delete this device and all its readings/alerts?')) return;
+  await fetch(`/api/devices/${id}`, { method:'DELETE' });
+  loadDevices();
+  loadSummary();
+}
+
+// ---------- charts ----------
+async function loadChartData() {
+  try {
+    const res = await fetch(`/api/readings/history?hours=${chartHours}&limit=4000`);
+    const rows = await res.json();
+    let data = rows;
+    if (chartDeviceId !== 'all') data = rows.filter(r => r.device_id == chartDeviceId);
+    updatePowerChart(data);
+    updateVoltageChart(data);
+    updateTempChart(data);
+    updateHumidityChart(data);
+  } catch(e) {}
+}
+
+function fmtLabel(ts, hours) {
+  const d = new Date(ts);
+  if (hours > 48) return (d.getMonth()+1)+'/'+d.getDate()+' '+d.getHours()+':00';
+  return d.getHours()+':'+String(d.getMinutes()).padStart(2,'0');
+}
+
+function aggregateByTimestamp(rows) {
+  const map = new Map();
+  for (const r of rows) {
+    if (!map.has(r.timestamp)) map.set(r.timestamp, { power:0, voltage:0, temperature:0, humidity:0, count:0 });
+    const g = map.get(r.timestamp);
+    g.power += (r.power || 0);
+    g.voltage += (r.voltage || 0);
+    g.temperature += (r.temperature || 0);
+    g.humidity += (r.humidity || 0);
+    g.count += 1;
+  }
+  return [...map.entries()].map(([ts, g]) => ({
+    timestamp: ts, power: g.power, voltage: g.voltage / g.count,
+    temperature: g.temperature / g.count, humidity: g.humidity / g.count
+  }));
+}
+
+function updatePowerChart(rows) {
+  const grouped = aggregateByTimestamp(rows);
+  const labels = grouped.map(g => fmtLabel(g.timestamp, chartHours));
+  const values = grouped.map(g => Math.round(g.power * 10) / 10);
+  const ctx = document.getElementById('powerChart').getContext('2d');
+  if (powerChartInstance) powerChartInstance.destroy();
+  powerChartInstance = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [{
+      label: chartDeviceId === 'all' ? 'Power - All Devices (W)' : 'Power (W)',
+      data: values,
+      borderColor: cssVar('--accent'),
+      backgroundColor: 'rgba(59,130,246,0.1)',
+      fill: true, tension: 0.3, pointRadius: 1,
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: cssVar('--text-faint'), maxTicksLimit: 12 }, grid: { color: cssVar('--bg-3') } },
+        y: { ticks: { color: cssVar('--text-faint') }, grid: { color: cssVar('--bg-3') } }
+      }
+    }
+  });
+}
+
+function updateVoltageChart(rows) {
+  const grouped = aggregateByTimestamp(rows);
+  const labels = grouped.map(g => fmtLabel(g.timestamp, chartHours));
+  const values = grouped.map(g => Math.round(g.voltage * 10) / 10);
+  const ctx = document.getElementById('voltageChart').getContext('2d');
+  if (voltageChartInstance) voltageChartInstance.destroy();
+  voltageChartInstance = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [{
+      label: 'Voltage (V)',
+      data: values,
+      borderColor: cssVar('--green'),
+      backgroundColor: 'rgba(34,197,94,0.1)',
+      fill: true, tension: 0.3, pointRadius: 1,
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: cssVar('--text-faint'), maxTicksLimit: 12 }, grid: { color: cssVar('--bg-3') } },
+        y: { ticks: { color: cssVar('--text-faint') }, grid: { color: cssVar('--bg-3') } }
+      }
+    }
+  });
+}
+
+function updateTempChart(rows) {
+  const grouped = aggregateByTimestamp(rows);
+  const labels = grouped.map(g => fmtLabel(g.timestamp, chartHours));
+  const values = grouped.map(g => Math.round(g.temperature * 10) / 10);
+  const ctx = document.getElementById('tempChart').getContext('2d');
+  if (tempChartInstance) tempChartInstance.destroy();
+  tempChartInstance = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [{
+      label: 'Temperature (°C)',
+      data: values,
+      borderColor: cssVar('--yellow'),
+      backgroundColor: 'rgba(234,179,8,0.1)',
+      fill: true, tension: 0.3, pointRadius: 1,
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: cssVar('--text-faint'), maxTicksLimit: 12 }, grid: { color: cssVar('--bg-3') } },
+        y: { ticks: { color: cssVar('--text-faint') }, grid: { color: cssVar('--bg-3') } }
+      }
+    }
+  });
+}
+
+function updateHumidityChart(rows) {
+  const grouped = aggregateByTimestamp(rows);
+  const labels = grouped.map(g => fmtLabel(g.timestamp, chartHours));
+  const values = grouped.map(g => Math.round(g.humidity * 10) / 10);
+  const ctx = document.getElementById('humidityChart').getContext('2d');
+  if (humidityChartInstance) humidityChartInstance.destroy();
+  humidityChartInstance = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [{
+      label: 'Humidity (%)',
+      data: values,
+      borderColor: cssVar('--red'),
+      backgroundColor: 'rgba(239,68,68,0.1)',
+      fill: true, tension: 0.3, pointRadius: 1,
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: cssVar('--text-faint'), maxTicksLimit: 12 }, grid: { color: cssVar('--bg-3') } },
+        y: { ticks: { color: cssVar('--text-faint') }, grid: { color: cssVar('--bg-3') } }
+      }
+    }
+  });
+}
+
+// ---------- usage insights ----------
+async function loadTrend() {
+  try {
+    const res = await fetch('/api/usage/trend?days=7');
+    const rows = await res.json();
+    const labels = rows.map(r => { const d = new Date(r.day); return (d.getMonth()+1)+'/'+d.getDate(); });
+    const values = rows.map(r => r.energy_kwh);
+    const ctx = document.getElementById('trendChart').getContext('2d');
+    if (trendChartInstance) trendChartInstance.destroy();
+    trendChartInstance = new Chart(ctx, {
+      type: 'bar',
+      data: { labels, datasets: [{
+        label: 'Energy (kWh)',
+        data: values,
+        backgroundColor: 'rgba(59,130,246,0.55)',
+        borderColor: cssVar('--accent'),
+        borderWidth: 1, borderRadius: 4,
+      }]},
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: cssVar('--text-faint') }, grid: { color: cssVar('--bg-3') } },
+          y: { ticks: { color: cssVar('--text-faint') }, grid: { color: cssVar('--bg-3') } }
+        }
+      }
+    });
+  } catch(e) {}
+}
+
+async function loadRanking() {
+  try {
+    const res = await fetch('/api/usage/ranking?hours=24');
+    const rows = await res.json();
+    const top = rows.slice(0, 10);
+    const max = top.length ? top[0].energy_kwh : 0;
+    $('rankList').innerHTML = top.length === 0
+      ? '<div style="color:var(--text-faint);font-size:0.85rem;">No data yet</div>'
+      : top.map((r, i) => {
+          const pct = max > 0 ? Math.max((r.energy_kwh / max) * 100, 2) : 0;
+          return `<div class="rank-item">
+            <div class="rank-top">
+              <span class="rn">${i+1}</span>
+              <span class="rname">${r.name}</span>
+              <span class="renergy">${fnum(r.energy_kwh,2)} kWh</span>
+              <span class="rcost">${fnum(r.cost,2)}</span>
+            </div>
+            <div class="rank-bar"><div style="width:${pct}%"></div></div>
+          </div>`;
+        }).join('');
+  } catch(e) {}
+}
+
+// ---------- alerts ----------
+async function loadAlerts() {
+  try {
+    const res = await fetch('/api/alerts?limit=100');
+    allAlerts = await res.json();
+    renderAlerts(allAlerts);
+  } catch(e) {}
+}
+
+function populateAlertFilter(devices) {
+  const sel = $('alertFilter');
+  sel.innerHTML = '<option value="all">All Devices</option>' +
+    devices.map(d => `<option value="${d.id}">${d.name}</option>`).join('');
+  sel.onchange = () => filterAlerts();
+}
+
+function filterAlerts() {
+  const val = $('alertFilter').value;
+  if (val === 'all') renderAlerts(allAlerts);
+  else renderAlerts(allAlerts.filter(a => a.device_id == val));
+}
+
+function renderAlerts(alerts) {
+  const body = $('alertBody');
+  if (alerts.length === 0) {
+    body.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text-faint);">No alerts</td></tr>';
+    return;
+  }
+  body.innerHTML = alerts.map(a => {
+    const sev = a.severity || 'warning';
+    return `<tr>
+      <td style="color:var(--text-faint);font-size:0.78rem;white-space:nowrap;">${new Date(a.created_at).toLocaleString()}</td>
+      <td>${esc(a.device_name || 'Device '+a.device_id)}</td>
+      <td>${esc(a.type)}</td>
+      <td>${a.value !== null && a.value !== undefined ? fnum(a.value, 1) : '--'}</td>
+      <td>${a.threshold !== null && a.threshold !== undefined ? fnum(a.threshold, 0) : '--'}</td>
+      <td>${esc(a.message)}</td>
+      <td><span class="severity-${sev}">${esc(sev)}</span></td>
+      <td>${a.acknowledged ? '<span style="color:var(--text-faint);">Acknowledged</span>' :
+        `<button class="ack-btn" data-id="${a.id}">Acknowledge</button>`}</td>
+    </tr>`;
+  }).join('');
+  qq('.ack-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await fetch('/api/alerts/acknowledge', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ alert_id: parseInt(btn.getAttribute('data-id')) })
+      });
+      loadAlerts();
+      loadSummary();
+    });
+  });
+}
+
+// ---------- toasts ----------
+function showToast(title, message, severity) {
+  const el = document.createElement('div');
+  el.className = 'toast ' + (severity === 'critical' ? 'critical' : '');
+  el.innerHTML = `<div class="toast-title">${title}<button class="toast-close">×</button></div>
+    <div class="toast-msg">${message}</div>`;
+  $('toastContainer').appendChild(el);
+  const close = () => el.remove();
+  el.querySelector('.toast-close').addEventListener('click', close);
+  setTimeout(close, 8000);
+}
+
+// ---------- export ----------
+$('exportReadingsBtn').addEventListener('click', () => {
+  window.location.href = '/api/export/readings?hours=24';
+});
+$('exportAlertsBtn').addEventListener('click', () => {
+  window.location.href = '/api/export/alerts?hours=168';
+});
+
+// ---------- acknowledge all ----------
+$('ackAllBtn').addEventListener('click', async () => {
+  if (!confirm('Acknowledge all active alerts?')) return;
+  await fetch('/api/alerts/acknowledge', { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
+  loadAlerts();
+  loadSummary();
+});
+
+// ---------- settings ----------
+async function loadSettings() {
+  try {
+    const res = await fetch('/api/settings');
+    const data = await res.json();
+    $('setRate').value = data.energy_rate;
+    $('setCurrency').value = data.currency;
+    $('thresholdBody').innerHTML = data.devices.map(d => `
+      <tr>
+        <td>${esc(d.name)} <span style="color:var(--text-faint);font-size:0.75rem;">${esc(d.location)}</span></td>
+        <td><input type="number" data-id="${d.id}" data-key="power" step="10" min="1" value="${d.power !== null ? d.power : data.defaults.power}" class="th-input"></td>
+        <td><input type="number" data-id="${d.id}" data-key="voltage_min" step="1" min="1" value="${d.voltage_min !== null ? d.voltage_min : data.defaults.voltage_min}" class="th-input"></td>
+        <td><input type="number" data-id="${d.id}" data-key="voltage_max" step="1" min="1" value="${d.voltage_max !== null ? d.voltage_max : data.defaults.voltage_max}" class="th-input"></td>
+        <td><input type="number" data-id="${d.id}" data-key="current" step="0.5" min="0.1" value="${d.current !== null ? d.current : data.defaults.current}" class="th-input"></td>
+        <td><input type="number" data-id="${d.id}" data-key="temp_min" step="1" min="-20" value="${d.temp_min !== null ? d.temp_min : data.defaults.temp_min}" class="th-input"></td>
+        <td><input type="number" data-id="${d.id}" data-key="temp_max" step="1" min="-20" value="${d.temp_max !== null ? d.temp_max : data.defaults.temp_max}" class="th-input"></td>
+      </tr>`).join('');
+    qq('.th-input').forEach(i => i.addEventListener('input', () => { $('setThresholdMsg').textContent = ''; }));
+  } catch(e) {}
+}
+
+$('saveGlobalBtn').addEventListener('click', async () => {
+  const rate = parseFloat($('setRate').value);
+  if (!(rate > 0)) { $('setGlobalMsg').textContent = 'Enter a valid energy rate'; $('setGlobalMsg').style.color = 'var(--red)'; return; }
+  const res = await fetch('/api/settings', {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ energy_rate: rate, currency: $('setCurrency').value.trim() })
+  });
+  if (res.ok) {
+    $('setGlobalMsg').textContent = 'Saved successfully';
+    $('setGlobalMsg').style.color = 'var(--green)';
+    loadSummary();
+  } else {
+    const data = await res.json();
+    $('setGlobalMsg').textContent = data.error || 'Failed to save';
+    $('setGlobalMsg').style.color = 'var(--red)';
+  }
+});
+
+$('saveThresholdsBtn').addEventListener('click', async () => {
+  const devices = [...qq('.th-input')].reduce((acc, inp) => {
+    const id = inp.getAttribute('data-id');
+    const key = inp.getAttribute('data-key');
+    const val = parseFloat(inp.value);
+    if (!acc[id]) acc[id] = { id: parseInt(id) };
+    if (!isNaN(val) && val > 0) acc[id][key] = val;
+    return acc;
+  }, {});
+  const res = await fetch('/api/settings', {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ devices: Object.values(devices) })
+  });
+  $('setThresholdMsg').textContent = res.ok ? 'Thresholds saved — new readings will use them' : 'Failed to save thresholds';
+  $('setThresholdMsg').style.color = res.ok ? 'var(--green)' : 'var(--red)';
+});
+
+$('resetThresholdsBtn').addEventListener('click', async () => {
+  if (!confirm('Reset all devices to default thresholds?')) return;
+  const res = await fetch('/api/settings', {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ apply_defaults: true })
+  });
+  if (res.ok) loadSettings();
+});
+
+// ---------- range toggle ----------
+qq('#rangeToggle button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    qq('#rangeToggle button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    chartHours = parseInt(btn.getAttribute('data-hours'));
+    loadChartData();
+  });
+});
+
+// ---------- socket events ----------
+// Throttle chart reloads so rapid WebSocket bursts don't rebuild charts every second
+function throttledChartReload() {
+  const now = Date.now();
+  if (now - lastChartReload < 5000) return;
+  lastChartReload = now;
+  if ($('pageOverview').classList.contains('active')) {
+    loadChartData();
+    loadRanking();
+  }
+}
+
+socket.on('new_readings', () => {
+  loadDevices();
+  loadSummary();
+  throttledChartReload();
+});
+
+socket.on('new_alerts', (data) => {
+  if (data && data.length > 0) {
+    data.forEach(a => {
+      showToast(esc(a.device_name || ('Device ' + a.device_id)), a.message, a.severity);
+    });
+    loadAlerts();
+    loadSummary();
+  }
+});
+
+// ---------- init ----------
+loadSummary();
+loadDevices();
+loadAlerts();
+loadChartData();
+loadTrend();
+loadRanking();
+loadSettings();
+
+setInterval(loadSummary, 10000);
+setInterval(loadAlerts, 15000);
+</script>
+</body>
+</html>

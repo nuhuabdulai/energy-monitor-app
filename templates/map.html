@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Device Map — Smart Energy Monitor</title>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --bg-2: #1e293b;
+      --bg-3: #0b1220;
+      --border: #334155;
+      --text: #e2e8f0;
+      --text-dim: #94a3b8;
+      --text-faint: #64748b;
+      --accent: #3b82f6;
+      --green: #22c55e;
+      --yellow: #eab308;
+      --red: #ef4444;
+      --grey: #64748b;
+    }
+    body[data-theme="light"] {
+      --bg: #f1f5f9;
+      --bg-2: #ffffff;
+      --bg-3: #e2e8f0;
+      --border: #cbd5e1;
+      --text: #0f172a;
+      --text-dim: #475569;
+      --text-faint: #64748b;
+      --grey: #94a3b8;
+    }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; transition:background 0.25s,color 0.25s; }
+    .app { display:flex; min-height:100vh; }
+    .sidebar { width:220px; background:var(--bg-2); border-right:1px solid var(--border); padding:20px 0; flex-shrink:0; display:flex; flex-direction:column; transition:transform 0.25s; z-index:40; }
+    .sidebar h3 { padding:0 20px; font-size:1rem; color:#38bdf8; margin-bottom:20px; }
+    .sidebar a { display:flex; align-items:center; gap:10px; padding:10px 20px; color:var(--text-dim); text-decoration:none; font-size:0.9rem; transition:all 0.15s; border-left:3px solid transparent; }
+    .sidebar a:hover, .sidebar a.active { background:var(--bg); color:var(--text); border-left-color:var(--accent); }
+    .sidebar .user-info { padding:12px 20px; border-top:1px solid var(--border); margin-top:auto; font-size:0.8rem; color:var(--text-faint); }
+    .sidebar .user-info a { padding:0; border-left:none; color:var(--red); font-size:0.8rem; text-decoration:none; display:inline-block; margin-top:4px; }
+    .theme-toggle { display:flex; align-items:center; gap:8px; margin:8px 20px; padding:8px 10px; border:1px solid var(--border); border-radius:8px; background:transparent; color:var(--text-dim); font-size:0.8rem; cursor:pointer; }
+    .theme-toggle:hover { border-color:var(--accent); color:var(--text); }
+    .main { flex:1; display:flex; flex-direction:column; min-width:0; }
+    .topbar { display:flex; align-items:center; gap:12px; padding:12px 24px; background:var(--bg-2); border-bottom:1px solid var(--border); position:sticky; top:0; z-index:30; }
+    .topbar h2 { font-size:1.15rem; }
+    .topbar .spacer { flex:1; }
+    .hamburger { display:none; background:none; border:1px solid var(--border); color:var(--text); border-radius:8px; padding:6px 10px; font-size:1rem; cursor:pointer; }
+    .content { padding:24px; flex:1; overflow-y:auto; }
+    .floorplan { display:grid; grid-template-columns:repeat(5,1fr); gap:16px; max-width:1200px; margin:0 auto; }
+    .room { background:var(--bg-2); border-radius:12px; padding:16px; border:2px solid var(--border); text-align:center; transition:all 0.3s; min-height:140px; display:flex; flex-direction:column; justify-content:center; align-items:center; }
+    .room .name { font-size:0.85rem; font-weight:600; margin-bottom:4px; }
+    .room .loc { font-size:0.75rem; color:var(--text-faint); margin-bottom:8px; }
+    .room .reading { font-size:1.1rem; font-weight:700; }
+    .room .sub { font-size:0.75rem; color:var(--text-dim); }
+    .room .status-dot { width:12px; height:12px; border-radius:50%; display:inline-block; margin-bottom:6px; }
+    .room.normal { border-color:var(--green); }
+    .room.normal .status-dot { background:var(--green); }
+    .room.warning { border-color:var(--yellow); }
+    .room.warning .status-dot { background:var(--yellow); }
+    .room.alert { border-color:var(--red); animation:pulse-border 1.5s infinite; }
+    .room.alert .status-dot { background:var(--red); }
+    .room.offline { border-color:var(--grey); opacity:0.6; }
+    .room.offline .status-dot { background:var(--grey); }
+    .legend { display:flex; gap:20px; justify-content:center; margin-bottom:24px; flex-wrap:wrap; }
+    .legend-item { display:flex; align-items:center; gap:6px; font-size:0.8rem; color:var(--text-dim); }
+    .legend-dot { width:10px; height:10px; border-radius:50%; }
+    .legend-dot.green { background:var(--green); }
+    .legend-dot.yellow { background:var(--yellow); }
+    .legend-dot.red { background:var(--red); }
+    .legend-dot.grey { background:var(--grey); }
+    .floor-label { grid-column:1/-1; text-align:center; color:var(--text-faint); font-size:0.8rem; text-transform:uppercase; letter-spacing:1px; padding:8px 0; border-bottom:1px solid var(--bg-2); margin-bottom:4px; }
+    .summary-chips { display:flex; gap:12px; justify-content:center; margin-bottom:20px; flex-wrap:wrap; }
+    .chip { background:var(--bg-2); border:1px solid var(--border); border-radius:10px; padding:8px 16px; font-size:0.85rem; color:var(--text-dim); }
+    .chip b { color:var(--text); }
+    @keyframes pulse-border { 0%,100% { border-color:var(--red); } 50% { border-color:#7f1d1d; } }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+    /* Mobile sidebar backdrop */
+    .backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:35; }
+    .backdrop.show { display:block; }
+    @media (max-width:1024px) { .floorplan { grid-template-columns:repeat(3,1fr); } }
+    @media (max-width:768px) {
+      .sidebar { position:fixed; top:0; left:0; bottom:0; width:220px; transform:translateX(-100%); }
+      .sidebar.open { transform:none; }
+      .hamburger { display:inline-block; }
+      .content { padding:14px; }
+      .floorplan { grid-template-columns:repeat(2,1fr); }
+    }
+    @media (max-width:420px) { .floorplan { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+<div class="app">
+  <nav class="sidebar" id="sidebar">
+    <h3>⚡ Energy Monitor</h3>
+    <a href="/dashboard"><span>📊</span><span>Overview</span></a>
+    <a href="/dashboard" data-page="devices"><span>📱</span><span>Devices</span></a>
+    <a href="/dashboard" data-page="alerts"><span>🔔</span><span>Alerts</span></a>
+    <a href="/dashboard" data-page="settings"><span>⚙️</span><span>Settings</span></a>
+    <a href="#" class="active"><span>📍</span><span>Device Map</span></a>
+    <button class="theme-toggle" id="themeToggle">🌓 <span id="themeLabel">Dark</span></button>
+    <div class="user-info">
+      <div id="userName">{{ user_name }}</div>
+      <a href="#" id="logoutBtn">Sign out</a>
+    </div>
+  </nav>
+  <div class="main">
+    <div class="topbar">
+      <button class="hamburger" id="hamburger" aria-label="Menu">☰</button>
+      <h2>Device Map</h2>
+      <div class="spacer"></div>
+      <div style="display:flex;align-items:center;gap:6px;font-size:0.8rem;color:var(--green);">
+        <span style="width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 1.5s infinite;"></span>
+        Live
+      </div>
+    </div>
+    <div class="content">
+      <div class="summary-chips" id="summaryChips"></div>
+      <div class="legend">
+        <div class="legend-item"><span class="legend-dot green"></span> Normal</div>
+        <div class="legend-item"><span class="legend-dot yellow"></span> Warning</div>
+        <div class="legend-item"><span class="legend-dot red"></span> Alert</div>
+        <div class="legend-item"><span class="legend-dot grey"></span> Offline</div>
+      </div>
+      <div class="floorplan" id="floorplan"></div>
+    </div>
+  </div>
+  <div class="backdrop" id="backdrop"></div>
+</div>
+<script>
+const socket = io();
+const $ = id => document.getElementById(id);
+const fnum = (n,d) => n===undefined||n===null?'--':Number(n).toFixed(d);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+));
+
+// ---------- theme ----------
+function applyTheme(theme) {
+  document.body.setAttribute('data-theme', theme);
+  localStorage.setItem('energy_theme', theme);
+  $('themeLabel').textContent = theme === 'light' ? 'Light' : 'Dark';
+}
+$('themeToggle').addEventListener('click', () => {
+  const next = document.body.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+  applyTheme(next);
+});
+applyTheme(localStorage.getItem('energy_theme') || 'dark');
+
+function getStatus(device) {
+  if (!device.is_active) return 'offline';
+  if (device.alert_count > 0) return 'alert';
+  if (device.power > 3000) return 'warning';
+  return 'normal';
+}
+
+function renderMap(devices) {
+  const grid = $('floorplan');
+  grid.innerHTML = '<div class="floor-label">Floor Plan</div>' +
+    devices.map(d => {
+      const status = getStatus(d);
+      const reading = status === 'offline' ? 'Offline' : (fnum(d.power,0) + ' W');
+      return `<div class="room ${status}" data-id="${d.id}">
+        <span class="status-dot"></span>
+        <div class="name">${esc(d.name)}</div>
+        <div class="loc">${esc(d.location)}</div>
+        <div class="reading">${reading}</div>
+        <div class="sub">${status === 'offline' ? '' : (fnum(d.temperature,1)+'°C / '+fnum(d.humidity,0)+'%')}</div>
+        ${d.alert_count > 0 ? `<div style="font-size:0.7rem;color:#ef4444;margin-top:4px;">${d.alert_count} alert${d.alert_count>1?'s':''}</div>` : ''}
+      </div>`;
+    }).join('');
+}
+
+function renderSummary(devices) {
+  const total = devices.length;
+  const online = devices.filter(d => d.is_active).length;
+  const alerts = devices.reduce((s,d) => s + (d.alert_count||0), 0);
+  $('summaryChips').innerHTML =
+    `<div class="chip">Devices <b>${total}</b></div>` +
+    `<div class="chip">Online <b>${online}</b></div>` +
+    `<div class="chip">Active Alerts <b style="color:${alerts>0?'#ef4444':'#22c55e'}">${alerts}</b></div>`;
+}
+
+async function loadMap() {
+  try {
+    const res = await fetch('/api/devices');
+    const devices = await res.json();
+    renderMap(devices);
+    renderSummary(devices);
+  } catch(e) {}
+}
+
+// sidebar navigation to dashboard pages
+document.querySelectorAll('.sidebar a[data-page]').forEach(a => {
+  a.addEventListener('click', (e) => {
+    e.preventDefault();
+    window.location.href = '/dashboard?page=' + a.getAttribute('data-page');
+  });
+});
+
+// mobile hamburger
+function closeSidebar() {
+  $('sidebar').classList.remove('open');
+  $('backdrop').classList.remove('show');
+}
+$('hamburger').addEventListener('click', () => {
+  $('sidebar').classList.toggle('open');
+  $('backdrop').classList.toggle('show');
+});
+$('backdrop').addEventListener('click', closeSidebar);
+document.addEventListener('click', (e) => {
+  const sidebar = $('sidebar');
+  if (sidebar.classList.contains('open') && !sidebar.contains(e.target) && !e.target.closest('#hamburger')) {
+    closeSidebar();
+  }
+});
+
+// logout
+$('logoutBtn').addEventListener('click', async (e) => {
+  e.preventDefault();
+  await fetch('/api/logout', { method: 'POST' });
+  window.location.href = '/login';
+});
+
+loadMap();
+setInterval(loadMap, 10000);
+
+socket.on('new_readings', () => loadMap());
+socket.on('new_alerts', () => loadMap());
+</script>
+</body>
+</html>

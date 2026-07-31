@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign Up — Smart Energy Monitor</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; background:#0f172a; color:#e2e8f0; min-height:100vh; display:flex; align-items:center; justify-content:center; }
+    .auth-box { background:#1e293b; border-radius:16px; padding:40px; width:100%; max-width:400px; border:1px solid #334155; }
+    h2 { text-align:center; margin-bottom:8px; font-size:1.5rem; }
+    .sub { text-align:center; color:#94a3b8; font-size:0.9rem; margin-bottom:24px; }
+    .form-group { margin-bottom:16px; }
+    label { display:flex; justify-content:space-between; font-size:0.85rem; color:#94a3b8; margin-bottom:6px; }
+    .input-wrap { position:relative; }
+    input { width:100%; padding:12px 14px; border-radius:8px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:0.95rem; outline:none; transition:border 0.2s; }
+    input:focus { border-color:#3b82f6; }
+    input.error { border-color:#ef4444; }
+    input.valid { border-color:#22c55e; }
+    .toggle-pw { position:absolute; right:12px; top:50%; transform:translateY(-50%); background:none; border:none; color:#64748b; cursor:pointer; font-size:0.85rem; padding:4px; }
+    .toggle-pw:hover { color:#94a3b8; }
+    .btn { width:100%; padding:12px; border-radius:8px; font-size:1rem; font-weight:600; border:none; cursor:pointer; transition:all 0.2s; display:flex; align-items:center; justify-content:center; gap:8px; }
+    .btn-primary { background:#3b82f6; color:#fff; }
+    .btn-primary:hover:not(:disabled) { background:#2563eb; }
+    .btn:disabled { opacity:0.6; cursor:not-allowed; }
+    .btn .spinner { display:none; width:16px; height:16px; border:2px solid rgba(255,255,255,0.3); border-top-color:#fff; border-radius:50%; animation:spin 0.6s linear infinite; }
+    .btn.loading .spinner { display:inline-block; }
+    .btn.loading .btn-text { opacity:0.7; }
+    .error { color:#ef4444; font-size:0.85rem; margin-top:8px; text-align:center; min-height:1.2em; }
+    .field-error { color:#ef4444; font-size:0.75rem; margin-top:4px; display:none; }
+    .pw-strength { height:4px; border-radius:2px; margin-top:6px; background:#334155; overflow:hidden; transition:all 0.3s; }
+    .pw-strength-bar { height:100%; width:0%; border-radius:2px; transition:width 0.3s, background 0.3s; }
+    .pw-hint { font-size:0.75rem; color:#64748b; margin-top:4px; }
+    .link { text-align:center; margin-top:16px; font-size:0.85rem; color:#94a3b8; }
+    .link a { color:#38bdf8; text-decoration:none; }
+    .link a:hover { text-decoration:underline; }
+    @media (max-width:480px) {
+      body { padding:16px; }
+      .auth-box { padding:28px 20px; border-radius:12px; }
+      /* 16px prevents iOS Safari auto-zoom when focusing an input */
+      input { font-size:16px; }
+    }
+    @keyframes spin { to { transform:rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="auth-box">
+    <h2>Create Account</h2>
+    <p class="sub">Register for the energy monitoring dashboard</p>
+    <form id="signupForm" novalidate>
+      <div class="form-group">
+        <label for="name">Full Name</label>
+        <div class="input-wrap">
+          <input type="text" id="name" placeholder="Your name" required autocomplete="name">
+        </div>
+        <div class="field-error" id="nameError">Please enter your name</div>
+      </div>
+      <div class="form-group">
+        <label for="email">Email</label>
+        <div class="input-wrap">
+          <input type="email" id="email" placeholder="you@example.com" required autocomplete="email">
+        </div>
+        <div class="field-error" id="emailError">Please enter a valid email</div>
+      </div>
+      <div class="form-group">
+        <label for="password">Password <span class="pw-hint" id="pwStrengthLabel"></span></label>
+        <div class="input-wrap">
+          <input type="password" id="password" placeholder="At least 6 characters" required autocomplete="new-password" minlength="6">
+          <button type="button" class="toggle-pw" id="togglePw" tabindex="-1">Show</button>
+        </div>
+        <div class="pw-strength"><div class="pw-strength-bar" id="pwStrengthBar"></div></div>
+        <div class="field-error" id="pwError">Password must be at least 6 characters</div>
+      </div>
+      <div class="form-group">
+        <label for="confirmPw">Confirm Password</label>
+        <div class="input-wrap">
+          <input type="password" id="confirmPw" placeholder="Repeat password" required autocomplete="new-password">
+        </div>
+        <div class="field-error" id="confirmError">Passwords do not match</div>
+      </div>
+      <button type="submit" class="btn btn-primary" id="signupBtn">
+        <span class="spinner"></span>
+        <span class="btn-text">Create Account</span>
+      </button>
+      <div class="error" id="signupError"></div>
+    </form>
+    <div class="link">Already have an account? <a href="/login">Sign in</a></div>
+  </div>
+  <script>
+    const $ = id => document.getElementById(id);
+    const form = $('signupForm');
+    const name = $('name');
+    const email = $('email');
+    const password = $('password');
+    const confirmPw = $('confirmPw');
+    const btn = $('signupBtn');
+    const err = $('signupError');
+
+    // Auto-redirect if logged in
+    (async () => {
+      try {
+        const res = await fetch('/api/me');
+        if (res.ok) window.location.href = '/dashboard';
+      } catch(e) {}
+    })();
+
+    // Password show/hide
+    $('togglePw').addEventListener('click', () => {
+      const isPw = password.type === 'password';
+      password.type = isPw ? 'text' : 'password';
+      $('togglePw').textContent = isPw ? 'Hide' : 'Show';
+    });
+
+    // Password strength indicator
+    function calcStrength(pw) {
+      let score = 0;
+      if (pw.length >= 6) score += 1;
+      if (pw.length >= 10) score += 1;
+      if (/[A-Z]/.test(pw)) score += 1;
+      if (/[0-9]/.test(pw)) score += 1;
+      if (/[^A-Za-z0-9]/.test(pw)) score += 1;
+      return score;
+    }
+    password.addEventListener('input', () => {
+      const score = calcStrength(password.value);
+      const bar = $('pwStrengthBar');
+      const label = $('pwStrengthLabel');
+      const pct = Math.min(score * 20, 100);
+      bar.style.width = pct + '%';
+      if (password.value.length === 0) {
+        bar.style.background = '#334155';
+        label.textContent = '';
+      } else if (score <= 2) {
+        bar.style.background = '#ef4444';
+        label.textContent = 'Weak';
+      } else if (score <= 3) {
+        bar.style.background = '#eab308';
+        label.textContent = 'Fair';
+      } else {
+        bar.style.background = '#22c55e';
+        label.textContent = 'Strong';
+      }
+      // Real-time match check
+      if (confirmPw.value) {
+        const match = password.value === confirmPw.value;
+        confirmPw.classList.toggle('error', !match);
+        confirmPw.classList.toggle('valid', match);
+        $('confirmError').style.display = match ? 'none' : 'block';
+      }
+    });
+    confirmPw.addEventListener('input', () => {
+      const match = password.value === confirmPw.value;
+      confirmPw.classList.toggle('error', !match && confirmPw.value !== '');
+      confirmPw.classList.toggle('valid', match && confirmPw.value !== '');
+      $('confirmError').style.display = (!match && confirmPw.value !== '') ? 'block' : 'none';
+    });
+
+    // Field validation on blur
+    name.addEventListener('blur', () => {
+      const valid = name.value.trim().length > 0;
+      name.classList.toggle('error', !valid);
+      $('nameError').style.display = valid ? 'none' : 'block';
+    });
+    email.addEventListener('blur', () => {
+      const valid = email.value.trim() && email.validity.valid;
+      email.classList.toggle('error', !valid && email.value !== '');
+      $('emailError').style.display = (!valid && email.value !== '') ? 'block' : 'none';
+    });
+    password.addEventListener('blur', () => {
+      const valid = password.value.length >= 6;
+      password.classList.toggle('error', !valid && password.value !== '');
+      $('pwError').style.display = (!valid && password.value !== '') ? 'block' : 'none';
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      btn.classList.add('loading');
+      btn.disabled = true;
+
+      const nameVal = name.value.trim();
+      const emailVal = email.value.trim().toLowerCase();
+      const pwVal = password.value;
+      const confirmVal = confirmPw.value;
+
+      if (!nameVal) {
+        err.textContent = 'Please enter your name';
+        btn.classList.remove('loading'); btn.disabled = false; name.focus(); return;
+      }
+      if (!emailVal || !email.validity.valid) {
+        err.textContent = 'Please enter a valid email';
+        btn.classList.remove('loading'); btn.disabled = false; email.focus(); return;
+      }
+      if (pwVal.length < 6) {
+        err.textContent = 'Password must be at least 6 characters';
+        btn.classList.remove('loading'); btn.disabled = false; password.focus(); return;
+      }
+      if (pwVal !== confirmVal) {
+        err.textContent = 'Passwords do not match';
+        btn.classList.remove('loading'); btn.disabled = false; confirmPw.focus(); return;
+      }
+
+      try {
+        const res = await fetch('/api/signup', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ name: nameVal, email: emailVal, password: pwVal })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          err.textContent = data.error || 'Signup failed';
+          btn.classList.remove('loading'); btn.disabled = false;
+          return;
+        }
+        window.location.href = '/dashboard';
+      } catch(e) {
+        err.textContent = 'Connection error. Is the server running?';
+        btn.classList.remove('loading'); btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

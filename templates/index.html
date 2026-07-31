@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Energy Monitor</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; background:#0f172a; color:#e2e8f0; min-height:100vh; display:flex; flex-direction:column; }
+    .container { max-width:800px; margin:0 auto; padding:40px 20px; text-align:center; flex:1; display:flex; flex-direction:column; justify-content:center; }
+    h1 { font-size:2.5rem; margin-bottom:10px; background:linear-gradient(135deg,#38bdf8,#818cf8); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+    .subtitle { color:#94a3b8; font-size:1.1rem; margin-bottom:30px; }
+    .tagline { color:#64748b; font-size:0.95rem; margin-bottom:40px; line-height:1.6; }
+    .btn-group { display:flex; gap:16px; justify-content:center; flex-wrap:wrap; }
+    .btn { padding:14px 36px; border-radius:8px; font-size:1rem; font-weight:600; text-decoration:none; transition:all 0.2s; }
+    .btn-primary { background:#3b82f6; color:#fff; }
+    .btn-primary:hover { background:#2563eb; transform:translateY(-2px); }
+    .btn-outline { border:2px solid #3b82f6; color:#3b82f6; background:transparent; }
+    .btn-outline:hover { background:#3b82f6; color:#fff; transform:translateY(-2px); }
+    .features { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:20px; margin-top:50px; text-align:left; }
+    .feature-card { background:#1e293b; border-radius:12px; padding:20px; border:1px solid #334155; }
+    .feature-card h3 { color:#38bdf8; margin-bottom:8px; font-size:1rem; }
+    .feature-card p { color:#94a3b8; font-size:0.85rem; line-height:1.5; }
+    .footer { text-align:center; padding:20px; color:#475569; font-size:0.8rem; }
+    @media (max-width:600px) {
+      .container { padding:24px 16px; }
+      h1 { font-size:1.9rem; }
+      .subtitle { font-size:1rem; }
+      .btn { padding:12px 24px; }
+      .features { margin-top:30px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Smart Energy Monitor</h1>
+    <p class="subtitle">IoT-Based Energy Monitoring &amp; Alert System</p>
+    <p class="tagline">Real-time monitoring of electrical parameters &mdash; voltage, current, power, energy &mdash; with instant alerts for anomalies. Designed for residential buildings.</p>
+    <div class="btn-group">
+      <a href="/login" class="btn btn-primary">Sign In</a>
+      <a href="/signup" class="btn btn-outline">Create Account</a>
+    </div>
+    <div class="features">
+      <div class="feature-card"><h3>Real-Time Monitoring</h3><p>Live voltage, current, and power readings updated every 3 seconds across 20 smart meters.</p></div>
+      <div class="feature-card"><h3>Smart Alerts</h3><p>Instant notifications for over-voltage, under-voltage, over-current, and high-power events with configurable per-device thresholds.</p></div>
+      <div class="feature-card"><h3>Environment Tracking</h3><p>Live temperature and humidity monitoring for every smart meter alongside power and voltage trends.</p></div>
+      <div class="feature-card"><h3>Historical Data</h3><p>Track energy consumption patterns over 24 hours, 7 days, or custom ranges.</p></div>
+      <div class="feature-card"><h3>Interactive Dashboard</h3><p>Visualize device data with real-time charts, device cards, and an alert management console.</p></div>
+    </div>
+  </div>
+  <div class="footer">Koforidua Technical University &middot; Dept of Computer Science &middot; Project Work 2025</div>
+</body>
+</html>
