@@ -90,7 +90,8 @@ THRESHOLD_COLS = {
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get('ENERGY_DB_PATH', os.path.join(BASE_DIR, 'energy.db'))
-HOST = os.environ.get('HOST', '127.0.0.1')
+HOST = os.environ.get('HOST', '0.0.0.0')
+PORT = int(os.environ.get('PORT', '5000'))
 SECRET_KEY = os.environ.get('SECRET_KEY', os.urandom(64).hex())
 
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, 'templates'),
@@ -1168,11 +1169,11 @@ if __name__ == '__main__':
         logger.info('Starting broadcast thread...')
         bcast_thread = threading.Thread(target=broadcast_readings, daemon=True)
         bcast_thread.start()
-        logger.info('Server starting at http://%s:5000', HOST)
+        logger.info('Server starting at http://%s:%s', HOST, PORT)
         # The embedded Werkzeug server is fine for a demo deployment; the
         # allow_unsafe_werkzeug flag is required by Flask-SocketIO >= 5.4 /
         # Werkzeug >= 3.0 which refuse to run it in production without this opt-in.
-        socketio.run(app, host=HOST, port=5000, debug=False, allow_unsafe_werkzeug=True)
+        socketio.run(app, host=HOST, port=PORT, debug=False, allow_unsafe_werkzeug=True)
     except KeyboardInterrupt:
         logger.info('Shutting down...')
         SIMULATOR_RUNNING = False

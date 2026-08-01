@@ -13,10 +13,11 @@ services:
       - CURRENCY_SYMBOL=${CURRENCY_SYMBOL:-GH₵}
       - SIM_INTERVAL=${SIM_INTERVAL:-3}
       - RETENTION_DAYS=${RETENTION_DAYS:-30}
-      - ENERGY_DB_PATH=/app/data/energy.db
+      - ENERGY_DB_PATH=/data/energy.db
       - HOST=0.0.0.0
+      - PORT=5000
     volumes:
-      - energy-data:/app/data
+      - energy-data:/data
     restart: unless-stopped
 
 volumes:

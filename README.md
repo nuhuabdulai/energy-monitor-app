@@ -1,0 +1,55 @@
+---
+title: Smart Energy Monitor
+emoji: ⚡
+colorFrom: green
+colorTo: yellow
+sdk: docker
+app_port: 5000
+pinned: false
+---
+
+# Smart Energy Monitor
+
+A Flask + Flask-SocketIO web application that monitors 20 simulated smart
+meters in a home. It generates live readings, detects threshold violations
+(over-voltage, under-voltage, over-current, high power, temperature), flags
+power anomalies with a rolling z-score, sends optional email alerts, and
+produces daily/weekly/monthly energy & cost reports with CSV export.
+
+## Features
+
+- Live dashboard with WebSocket updates (readings + alerts stream in real time)
+- 20 virtual smart meters with realistic load profiles and occasional spikes
+- Configurable alert thresholds (global defaults + per-device overrides)
+- ML-style anomaly detection (rolling z-score over each device's power history)
+- Energy / cost reports bucketed daily, weekly, monthly + CSV export
+- Device usage ranking, trends, and an interactive floor map
+- User accounts with password hashing and brute-force login lockout
+
+## Run locally
+
+```bash
+pip install -r requirements.txt
+python app.py                 # -> http://localhost:5000
+# or with Docker
+docker compose up --build
+```
+
+## Configuration (environment variables)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SECRET_KEY` | `change-me-in-production` | Session signing key |
+| `ENERGY_RATE` | `0.80` | Price per kWh (Ghana Cedis) |
+| `CURRENCY_SYMBOL` | `GH₵` | Currency display |
+| `SIM_INTERVAL` | `3` | Seconds between simulated readings |
+| `RETENTION_DAYS` | `30` | Reading retention window |
+| `SMTP_HOST/USER/PASSWORD` | (empty) | SMTP server for email alerts |
+| `PORT` | `5000` | HTTP port |
+| `HOST` | `0.0.0.0` | Bind address |
+
+## Tests
+
+```bash
+python -m pytest test_app.py
+```
