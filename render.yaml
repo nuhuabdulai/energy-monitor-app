@@ -1,0 +1,25 @@
+# Render Blueprint for the Smart Energy Monitor (free tier).
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: energy-monitor
+    runtime: docker
+    repo: https://github.com/nuhuabdulai/energy-monitor-app
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ENERGY_RATE
+        value: "0.80"
+      - key: CURRENCY_SYMBOL
+        value: "GH₵"
+      - key: SIM_INTERVAL
+        value: "3"
+      - key: RETENTION_DAYS
+        value: "30"
+      - key: ENERGY_DB_PATH
+        value: "/data/energy.db"
+      - key: HOST
+        value: "0.0.0.0"
