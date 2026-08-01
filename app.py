@@ -503,6 +503,22 @@ def index():
         return redirect('/dashboard')
     return render_template('index.html')
 
+# PWA support: manifest + service worker served from the root so the worker
+# scope covers the whole app (Ch. 5 recommendation: mobile experience).
+@app.route('/manifest.webmanifest')
+def webmanifest():
+    resp = app.send_static_file('manifest.webmanifest')
+    resp.headers['Content-Type'] = 'application/manifest+json'
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
+@app.route('/sw.js')
+def service_worker():
+    resp = app.send_static_file('sw.js')
+    resp.headers['Content-Type'] = 'application/javascript'
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
 @app.route('/login')
 def login_page():
     return render_template('login.html')
