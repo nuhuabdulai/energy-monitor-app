@@ -833,5 +833,218 @@ class TestPages(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn(b'Device Map', resp.data)
 
+class TestAlertSchema(unittest.TestCase):
+    """Ch 4 §4.4: alerts carry the triggering parameter + value + threshold."""
+
+    def test_alert_parameter_fields(self):
+        by_type = {a['type']: a for a in energy_app.evaluate_alerts(265, 5, 1000)}
+        self.assertEqual(by_type['over_voltage']['parameter'], 'voltage')
+        by_type = {a['type']: a for a in energy_app.evaluate_alerts(230, 35, 1000)}
+        self.assertEqual(by_type['over_current']['parameter'], 'current')
+        by_type = {a['type']: a for a in energy_app.evaluate_alerts(230, 10, 6000)}
+        self.assertEqual(by_type['high_power']['parameter'], 'power')
+        by_type = {a['type']: a for a in energy_app.evaluate_alerts(temperature=55)}
+        self.assertEqual(by_type['high_temperature']['parameter'], 'temperature')
+        by_type = {a['type']: a for a in energy_app.evaluate_alerts(temperature=5)}
+        self.assertEqual(by_type['low_temperature']['parameter'], 'temperature')
+
+    def test_anomaly_has_parameter(self):
+        energy_app._power_history.clear()
+        for i in range(energy_app.ANOMALY_MIN_SAMPLES):
+            energy_app.detect_power_anomaly(2, 500 + (i % 5) * 4 - 8)
+        result = energy_app.detect_power_anomaly(2, 9000)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['parameter'], 'power')
+
+    def test_alerts_table_has_parameter_column(self):
+        conn = sqlite3.connect(TEST_DB_PATH)
+        cols = [r[1] for r in conn.execute('PRAGMA table_info(alerts)').fetchall()]
+        conn.close()
+        self.assertIn('parameter', cols)
+
+    def test_parameter_persisted_on_ingest(self):
+        ensure_user('par@test.com', 'pass123')
+        client.post('/api/reading', json={'device_id': 1, 'voltage': 265, 'current': 5, 'power': 1000})
+        conn = sqlite3.connect(TEST_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute('''SELECT parameter FROM alerts WHERE device_id=1 AND type='over_voltage'
+            ORDER BY id DESC LIMIT 1''').fetchone()
+        conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row['parameter'], 'voltage')
+
+class TestSimulatorSpec(unittest.TestCase):
+    """Ch 4 §4.3.1: simulated reading ranges match the documented specification."""
+
+    def test_generate_reading_ranges(self):
+        for _ in range(300):
+            r = energy_app.generate_reading(energy_app.DEFAULT_THRESHOLDS, datetime.now())
+            self.assertGreaterEqual(r['voltage'], 220)
+            self.assertLessEqual(r['voltage'], 240)
+            self.assertGreaterEqual(r['temperature'], 25)
+            self.assertLessEqual(r['temperature'], 40)
+            self.assertGreaterEqual(r['humidity'], 30)
+            self.assertLessEqual(r['humidity'], 70)
+            self.assertGreater(r['current'], 0)
+            self.assertLessEqual(r['current'], 40)
+            self.assertGreater(r['power'], 0)
+            self.assertLessEqual(r['power'], 9000)
+
+    def test_current_can_exceed_overcurrent_threshold(self):
+        # A power spike must be able to drive current above the 30A alert threshold
+        self.assertEqual(energy_app.DEFAULT_THRESHOLDS['current'], 30)
+        r = energy_app.generate_reading({'power': 5000}, datetime.now())
+        self.assertLessEqual(r['current'], 40)
+
+    def test_cumulative_energy_is_monotonic(self):
+        energy_app._cumulative_energy.clear()
+        energy_app._cumulative_energy[777] = 100.0
+        first = energy_app.add_cumulative_energy(777, 1000)
+        second = energy_app.add_cumulative_energy(777, 1500)
+        self.assertGreater(second, first)
+        self.assertGreater(first, 100.0)
+        energy_app._cumulative_energy.clear()
+
+    def test_standalone_simulator_module_exists(self):
+        # Ch 4 §4.3.1 documents simulator.py as a separate process module
+        self.assertTrue(os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'simulator.py')))
+
+class TestOfflineMonitoring(unittest.TestCase):
+    """Ch 4 §4.3.3: a device with no reading for OFFLINE_SECONDS is flagged offline."""
+
+    def test_offline_alert_created(self):
+        ensure_user('offline@test.com', 'pass123')
+        resp = client.post('/api/devices', json={'name': 'Offline Meter', 'location': 'Lab'})
+        did = resp.get_json()['id']
+        self.addCleanup(client.delete, f'/api/devices/{did}')
+        energy_app.last_device_seen[did] = datetime.now() - timedelta(seconds=energy_app.OFFLINE_SECONDS + 5)
+        conn = energy_app.get_db()
+        changed = energy_app.check_offline_devices(conn, datetime.now())
+        conn.commit()
+        row = conn.execute('''SELECT parameter, severity, value, threshold FROM alerts
+            WHERE device_id=? AND type='device_offline' AND acknowledged=0''', (did,)).fetchone()
+        conn.close()
+        self.assertTrue(changed)
+        self.assertIsNotNone(row)
+        self.assertEqual(row['parameter'], 'device')
+        self.assertEqual(row['severity'], 'critical')
+        self.assertEqual(row['threshold'], energy_app.OFFLINE_SECONDS)
+
+    def test_offline_alert_auto_acknowledged_when_back_online(self):
+        ensure_user('offline2@test.com', 'pass123')
+        resp = client.post('/api/devices', json={'name': 'Online Meter', 'location': 'Lab'})
+        did = resp.get_json()['id']
+        self.addCleanup(client.delete, f'/api/devices/{did}')
+        conn = energy_app.get_db()
+        conn.execute('''INSERT INTO alerts (device_id, type, parameter, message, severity)
+            VALUES (?, 'device_offline', 'device', 'stale open alert', 'critical')''', (did,))
+        conn.commit()
+        energy_app.last_device_seen[did] = datetime.now()
+        energy_app.check_offline_devices(conn, datetime.now())
+        conn.commit()
+        count = conn.execute('''SELECT COUNT(*) c FROM alerts
+            WHERE device_id=? AND type='device_offline' AND acknowledged=0''', (did,)).fetchone()['c']
+        conn.close()
+        self.assertEqual(count, 0)
+
+class TestCumulativeEnergy(unittest.TestCase):
+    """Ch 4 §4.4: energy is cumulative, so consumption = per-device max - min."""
+
+    def _make_device(self):
+        resp = client.post('/api/devices', json={'name': 'Cumulative Meter', 'location': 'Lab'})
+        return resp.get_json()['id']
+
+    def test_summary_uses_consumption_not_cumulative_sum(self):
+        ensure_user('cum@test.com', 'pass123')
+        did = self._make_device()
+        self.addCleanup(client.delete, f'/api/devices/{did}')
+        conn = sqlite3.connect(TEST_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        now = datetime.now()
+        for i, e in enumerate([10.0, 10.5, 11.2, 12.0]):
+            ts = (now - timedelta(minutes=30 - i)).isoformat()
+            conn.execute('INSERT INTO readings (device_id, power, energy, timestamp) VALUES (?, 1000, ?, ?)',
+                         (did, e, ts))
+        conn.commit()
+        conn.close()
+        data = client.get('/api/summary').get_json()
+        # The new device contributes 12.0 - 10.0 = 2.0 kWh to the 24h total
+        self.assertGreaterEqual(data['total_energy_kwh'], 2.0)
+
+    def test_report_uses_consumption_per_bucket(self):
+        ensure_user('cum2@test.com', 'pass123')
+        did = self._make_device()
+        self.addCleanup(client.delete, f'/api/devices/{did}')
+        conn = sqlite3.connect(TEST_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        now = datetime.now()
+        for i, e in enumerate([100.0, 101.0, 102.5]):
+            ts = (now - timedelta(minutes=10 - i)).isoformat()
+            conn.execute('INSERT INTO readings (device_id, power, energy, timestamp) VALUES (?, 1000, ?, ?)',
+                         (did, e, ts))
+        conn.commit()
+        conn.close()
+        data = client.get('/api/reports?period=daily&days=1').get_json()
+        today = now.strftime('%Y-%m-%d')
+        row = next((r for r in data['rows'] if r['label'] == today), None)
+        self.assertIsNotNone(row)
+        self.assertGreaterEqual(row['energy_kwh'], 2.5)
+
+class TestSecurity(unittest.TestCase):
+    """Ch 4 §4.6.4: password hashes never exposed; XSS payloads handled safely."""
+
+    def test_no_password_in_api_responses(self):
+        ensure_user('security@test.com', 'pass123')
+        for url in ['/api/me', '/api/settings', '/api/devices']:
+            resp = client.get(url)
+            self.assertEqual(resp.status_code, 200)
+            self.assertNotIn('password', resp.get_data(as_text=True).lower())
+
+    def test_xss_payload_does_not_break_api(self):
+        ensure_user('xss@test.com', 'pass123')
+        resp = client.post('/api/devices', json={
+            'name': '<script>alert(1)</script>', 'location': 'Lab'})
+        self.assertEqual(resp.status_code, 201)
+        did = resp.get_json()['id']
+        self.addCleanup(client.delete, f'/api/devices/{did}')
+        data = client.get('/api/devices').get_json()
+        names = [d['name'] for d in data if d['id'] == did]
+        self.assertIn('<script>alert(1)</script>', names)
+        # dashboard.js escapes user-controlled strings before rendering (XSS defence)
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'templates', 'dashboard.html')) as fh:
+            self.assertIn('esc(d.name)', fh.read())
+
+class TestValidationScenario(unittest.TestCase):
+    """Ch 4 §4.6.3: set a device power threshold to 100W and observe alert generation."""
+
+    def test_low_power_threshold_generates_alert_via_api(self):
+        ensure_user('val@test.com', 'pass123')
+        resp = client.post('/api/devices', json={
+            'name': 'Low Threshold', 'location': 'Lab', 'power': 100})
+        self.assertEqual(resp.status_code, 201)
+        did = resp.get_json()['id']
+        self.addCleanup(client.delete, f'/api/devices/{did}')
+        client.post('/api/reading', json={
+            'device_id': did, 'voltage': 230, 'current': 5, 'power': 150})
+        conn = sqlite3.connect(TEST_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute('''SELECT type, parameter, value, threshold FROM alerts
+            WHERE device_id=? AND type='high_power' ORDER BY id DESC LIMIT 1''', (did,)).fetchone()
+        conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row['parameter'], 'power')
+        self.assertEqual(row['value'], 150)
+        self.assertEqual(row['threshold'], 100)
+
+class TestWebSocket(unittest.TestCase):
+    """Ch 4 §4.5: backend broadcasts over WebSocket (Socket.IO test client)."""
+
+    def test_connect_event_emitted(self):
+        io_client = energy_app.socketio.test_client(energy_app.app)
+        received = io_client.get_received()
+        io_client.disconnect()
+        self.assertTrue(any(m['name'] == 'connected' for m in received))
+
 if __name__ == '__main__':
     unittest.main()

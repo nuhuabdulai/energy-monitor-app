@@ -11,6 +11,7 @@ import math
 import threading
 import time
 import logging
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
@@ -65,6 +66,7 @@ ANOMALY_WINDOW = int(os.environ.get('ANOMALY_WINDOW', '60'))          # readings
 ANOMALY_MIN_SAMPLES = int(os.environ.get('ANOMALY_MIN_SAMPLES', '10'))  # window size before scoring
 ANOMALY_ZSCORE = float(os.environ.get('ANOMALY_ZSCORE', '3.0'))        # sigma threshold for a flag
 _power_history = {}  # device_id -> deque of recent power readings
+_cumulative_energy = {}  # device_id -> running cumulative kWh counter (spec: energy is cumulative)
 
 # Default alert thresholds (per-device overrides are stored in the devices table).
 # Values follow the project report (Ch. 5 findings): high-power >5000W and
@@ -93,6 +95,14 @@ DB_PATH = os.environ.get('ENERGY_DB_PATH', os.path.join(BASE_DIR, 'energy.db'))
 HOST = os.environ.get('HOST', '0.0.0.0')
 PORT = int(os.environ.get('PORT', '5000'))
 SECRET_KEY = os.environ.get('SECRET_KEY', os.urandom(64).hex())
+
+# Simulator transport: the simulator (embedded in app.py or standalone
+# simulator.py) sends every reading to the backend via HTTP POST /api/reading,
+# matching the documented architecture (Ch. 3 §3.5, Ch. 4 §4.3.1 & §4.5).
+SIMULATOR_SERVER_URL = os.environ.get('SIMULATOR_SERVER_URL', f'http://127.0.0.1:{PORT}').rstrip('/')
+# When '1' (default) app.py runs the simulator in-process. Set EMBEDDED_SIMULATOR=0
+# and run `python simulator.py` as a separate process instead.
+EMBEDDED_SIMULATOR = os.environ.get('EMBEDDED_SIMULATOR', '1') == '1'
 
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, 'templates'),
             static_folder=os.path.join(BASE_DIR, 'static'))
@@ -151,6 +161,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             device_id INTEGER NOT NULL,
             type TEXT NOT NULL,
+            parameter TEXT,
             message TEXT NOT NULL,
             severity TEXT DEFAULT 'warning',
             acknowledged INTEGER DEFAULT 0,
@@ -173,8 +184,8 @@ def init_db():
             conn.execute(f'ALTER TABLE devices ADD COLUMN {col} {coltype}')
         except sqlite3.OperationalError:
             pass  # column already exists
-    # Migration: add value/threshold columns to existing alerts tables
-    for col, coltype in (('value', 'REAL'), ('threshold', 'REAL')):
+    # Migration: add value/threshold/parameter columns to existing alerts tables
+    for col, coltype in (('value', 'REAL'), ('threshold', 'REAL'), ('parameter', 'TEXT')):
         try:
             conn.execute(f'ALTER TABLE alerts ADD COLUMN {col} {coltype}')
         except sqlite3.OperationalError:
@@ -217,6 +228,7 @@ def init_db():
         for dev_id in range(1, 21):
             base_v = random.uniform(220, 240)
             base_c = random.uniform(1, 15)
+            cum_kwh = random.uniform(20, 80)  # starting cumulative energy (kWh) baseline
             for h in range(24 * 7):
                 ts = now - timedelta(hours=24*7 - h)
                 hour_factor = 1 + 0.3 * math.sin((ts.hour - 8) * math.pi / 12)
@@ -225,14 +237,14 @@ def init_db():
                 c = max(0.1, c)
                 pf = random.uniform(0.75, 0.99)
                 p = v * c * pf
-                e = p * 1 / 1000
+                cum_kwh += p * 1 / 1000  # energy is cumulative kWh (spec Ch. 4 §4.4)
                 f = 50 + random.uniform(-0.5, 0.5)
                 tmp = random.uniform(25, 40)
                 hum = random.uniform(30, 70)
                 conn.execute('''INSERT INTO readings
                     (device_id, voltage, current, power, energy, power_factor, frequency, temperature, humidity, timestamp)
                     VALUES (?,?,?,?,?,?,?,?,?,?)''',
-                    (dev_id, round(v,2), round(c,3), round(p,2), round(e,3), round(pf,3), round(f,2),
+                    (dev_id, round(v,2), round(c,3), round(p,2), round(cum_kwh,3), round(pf,3), round(f,2),
                      round(tmp,1), round(hum,1), ts.isoformat()))
         conn.commit()
     conn.close()
@@ -280,28 +292,28 @@ def evaluate_alerts(voltage=None, current=None, power=None, temperature=None, th
     alerts = []
     if voltage is not None:
         if voltage > t['voltage_max']:
-            alerts.append({'type': 'over_voltage', 'severity': 'critical',
+            alerts.append({'type': 'over_voltage', 'parameter': 'voltage', 'severity': 'critical',
                            'message': f'Over-voltage detected: {voltage:.1f}V (max {t["voltage_max"]:.0f}V)',
                            'value': round(voltage, 2), 'threshold': t['voltage_max']})
         if voltage < t['voltage_min']:
-            alerts.append({'type': 'under_voltage', 'severity': 'warning',
+            alerts.append({'type': 'under_voltage', 'parameter': 'voltage', 'severity': 'warning',
                            'message': f'Under-voltage detected: {voltage:.1f}V (min {t["voltage_min"]:.0f}V)',
                            'value': round(voltage, 2), 'threshold': t['voltage_min']})
     if current is not None and current > t['current']:
-        alerts.append({'type': 'over_current', 'severity': 'critical',
+        alerts.append({'type': 'over_current', 'parameter': 'current', 'severity': 'critical',
                        'message': f'Over-current detected: {current:.2f}A (max {t["current"]:.0f}A)',
                        'value': round(current, 2), 'threshold': t['current']})
     if power is not None and power > t['power']:
-        alerts.append({'type': 'high_power', 'severity': 'warning',
+        alerts.append({'type': 'high_power', 'parameter': 'power', 'severity': 'warning',
                        'message': f'High power consumption: {power:.1f}W (max {t["power"]:.0f}W)',
                        'value': round(power, 1), 'threshold': t['power']})
     if temperature is not None:
         if temperature > t['temp_max']:
-            alerts.append({'type': 'high_temperature', 'severity': 'critical',
+            alerts.append({'type': 'high_temperature', 'parameter': 'temperature', 'severity': 'critical',
                            'message': f'High temperature: {temperature:.1f}°C (max {t["temp_max"]:.0f}°C)',
                            'value': round(temperature, 1), 'threshold': t['temp_max']})
         if temperature < t['temp_min']:
-            alerts.append({'type': 'low_temperature', 'severity': 'warning',
+            alerts.append({'type': 'low_temperature', 'parameter': 'temperature', 'severity': 'warning',
                            'message': f'Low temperature: {temperature:.1f}°C (min {t["temp_min"]:.0f}°C)',
                            'value': round(temperature, 1), 'threshold': t['temp_min']})
     return alerts
@@ -325,97 +337,146 @@ def detect_power_anomaly(device_id, power):
         if std > 1e-6:
             z = (power - mean) / std
             if abs(z) >= ANOMALY_ZSCORE:
-                result = {'type': 'anomaly', 'severity': 'warning',
+                result = {'type': 'anomaly', 'parameter': 'power', 'severity': 'warning',
                           'message': f'Unusual power consumption detected: {power:.0f}W ({z:+.1f}σ from device baseline)',
                           'value': round(power, 1), 'threshold': round(mean + ANOMALY_ZSCORE * std, 1)}
     hist.append(power)
     return result
 
-def simulate_readings():
-    """Simulates 20 virtual smart metres every SIM_INTERVAL seconds.
+def generate_reading(thresholds, now_ts):
+    """Generate one realistic reading dict (spec Ch. 4 §4.3.1).
 
-    Matches the project spec: power 50-3000W with ±5% noise and occasional
-    spike patterns, voltage 220-240V, current derived from power and voltage,
-    energy in cumulative kWh, temperature 25-40C, humidity 30-70%.
+    - Power: 50-3000W with ±5% noise, plus occasional spike patterns
+    - Voltage: 220-240V (standard residential range)
+    - Current: derived from power and voltage (0.5-40A, spikes may exceed 30A)
+    - Temperature: 25-40C, Humidity: 30-70%, Frequency: ~50Hz
     """
-    global SIMULATOR_RUNNING, last_device_seen
+    hour = now_ts.hour
+    # Hourly load profile (higher in morning/evening) with ±5% noise
+    profile = 0.5 + 0.5 * math.sin((hour - 8) * math.pi / 12)
+    power = random.uniform(50, 3000) * (0.4 + 0.6 * profile) * random.uniform(0.95, 1.05)
+    # Occasional spike patterns to exercise the alert engine
+    if random.random() < 0.01:
+        power = random.uniform(thresholds['power'] * 1.1, thresholds['power'] * 2.0)
+    power = max(10, min(9000, power))
+    v = random.gauss(230, 4)
+    v = max(220, min(240, v))
+    pf = random.gauss(0.88, 0.05)
+    pf = max(0.5, min(1.0, pf))
+    # Current derived from power and voltage; clamp allows spike-driven over-current
+    c = power / (v * pf)
+    c = max(0.1, min(40, c))
+    f = random.gauss(50, 0.2)
+    tmp = random.gauss(32, 4)   # 25-40C ambient + device heat
+    hum = random.gauss(50, 10)  # 30-70%
+    tmp = max(25, min(40, tmp))
+    hum = max(30, min(70, hum))
+    return {'voltage': round(v, 2), 'current': round(c, 3), 'power': round(power, 2),
+            'power_factor': round(pf, 3), 'frequency': round(f, 2),
+            'temperature': round(tmp, 1), 'humidity': round(hum, 1)}
+
+def add_cumulative_energy(device_id, power):
+    """Increment a device's cumulative energy (kWh) by this interval's delta."""
+    delta = power * (SIM_INTERVAL / 3600) / 1000
+    _cumulative_energy[device_id] = _cumulative_energy.get(device_id, 0.0) + delta
+    return _cumulative_energy[device_id]
+
+def init_cumulative_energy():
+    """Load each device's last stored (cumulative) energy so a restart continues
+    from the persisted value instead of resetting to zero."""
+    try:
+        conn = get_db()
+        rows = conn.execute('''SELECT device_id, energy FROM readings
+            WHERE id IN (SELECT MAX(id) FROM readings GROUP BY device_id)''').fetchall()
+        for r in rows:
+            if r['energy'] is not None:
+                _cumulative_energy[r['device_id']] = float(r['energy'])
+        conn.close()
+    except Exception as e:
+        logger.error('init_cumulative_energy error: %s', e)
+
+def post_reading(payload):
+    """Send one JSON reading to the backend /api/reading endpoint over HTTP."""
+    try:
+        req = urllib.request.Request(
+            f'{SIMULATOR_SERVER_URL}/api/reading',
+            data=json.dumps(payload).encode('utf-8'),
+            headers={'Content-Type': 'application/json'},
+            method='POST')
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 201
+    except Exception as e:
+        logger.error('Simulator POST failed (device %s): %s', payload.get('device_id'), e)
+        return False
+
+def simulate_readings():
+    """Simulates 20 virtual smart metres every SIM_INTERVAL seconds and sends
+    each reading to the backend via HTTP POST /api/reading (spec Ch. 4 §4.3.1).
+
+    The simulator only generates and transports readings — storage, the alert
+    engine, anomaly detection and offline monitoring all run on the backend.
+    """
+    global SIMULATOR_RUNNING
     time.sleep(1)
+    init_cumulative_energy()
     while SIMULATOR_RUNNING:
         try:
             conn = get_db()
             devices = conn.execute('''SELECT id, name, power_threshold, voltage_min, voltage_max,
                 current_max, temp_min, temp_max FROM devices WHERE is_active=1''').fetchall()
+            conn.close()
             now_ts = datetime.now()
-            now = now_ts.isoformat()
             for dev in devices:
                 did = dev['id']
                 thresholds = get_thresholds(dev)
-                hour = now_ts.hour
-                # Hourly load profile (higher in morning/evening) with ±5% noise
-                profile = 0.5 + 0.5 * math.sin((hour - 8) * math.pi / 12)
-                power = random.uniform(50, 3000) * (0.4 + 0.6 * profile) * random.uniform(0.95, 1.05)
-                # Occasional spike patterns to exercise the alert engine
-                if random.random() < 0.01:
-                    power = random.uniform(thresholds['power'] * 1.1, thresholds['power'] * 2.0)
-                power = max(10, min(9000, power))
-                v = random.gauss(230, 5)
-                v = max(180, min(265, v))
-                pf = random.gauss(0.88, 0.05)
-                pf = max(0.5, min(1.0, pf))
-                # Current derived from power and voltage (spec 4.3.1)
-                c = power / (v * pf)
-                c = max(0.1, min(30, c))
-                e = power * (SIM_INTERVAL / 3600) / 1000
-                f = random.gauss(50, 0.2)
-                tmp = random.gauss(32, 4)   # 25-40C ambient + device heat
-                hum = random.gauss(50, 10)  # 30-70%
-                tmp = max(10, min(55, tmp))
-                hum = max(20, min(90, hum))
-                conn.execute('''INSERT INTO readings
-                    (device_id, voltage, current, power, energy, power_factor, frequency, temperature, humidity, timestamp)
-                    VALUES (?,?,?,?,?,?,?,?,?,?)''',
-                    (did, round(v,2), round(c,3), round(power,2), round(e,6), round(pf,3), round(f,2),
-                     round(tmp,1), round(hum,1), now))
-                last_device_seen[did] = now_ts
-                for alert in evaluate_alerts(v, c, power, tmp, thresholds):
-                    if not alert_dedup_window(conn, did, alert['type']):
-                        conn.execute('''INSERT INTO alerts (device_id, type, message, severity, value, threshold)
-                            VALUES (?,?,?,?,?,?)''',
-                            (did, alert['type'], alert['message'], alert['severity'],
-                             alert['value'], alert['threshold']))
-                        maybe_email_alert(conn, dev['name'], alert)
-                # ML-style anomaly detection: flag readings that deviate strongly
-                # from the device's recent power baseline (rolling z-score)
-                anomaly = detect_power_anomaly(did, power)
-                if anomaly and not alert_dedup_window(conn, did, anomaly['type']):
-                    conn.execute('''INSERT INTO alerts (device_id, type, message, severity, value, threshold)
-                        VALUES (?,?,?,?,?,?)''',
-                        (did, anomaly['type'], anomaly['message'], anomaly['severity'],
-                         anomaly['value'], anomaly['threshold']))
-                    maybe_email_alert(conn, dev['name'], anomaly)
-            # Offline detection for ALL devices (active or not), 30s without a reading
-            all_devices = conn.execute('SELECT id FROM devices').fetchall()
-            for dev in all_devices:
-                did = dev['id']
-                last_seen = last_device_seen.get(did)
-                if last_seen and (now_ts - last_seen).total_seconds() > OFFLINE_SECONDS:
-                    existing = conn.execute(
-                        "SELECT id FROM alerts WHERE device_id=? AND type='device_offline' AND acknowledged=0",
-                        (did,)).fetchone()
-                    if not existing:
-                        conn.execute('''INSERT INTO alerts (device_id, type, message, severity, value, threshold)
-                            VALUES (?,?,?,?,?,?)''',
-                            (did, 'device_offline',
-                             f'Device {did} is offline — no reading for {OFFLINE_SECONDS}s',
-                             'critical', int((now_ts - last_seen).total_seconds()), OFFLINE_SECONDS))
-                elif last_seen:
-                    # Device is back online — auto-acknowledge any open offline alerts
-                    conn.execute('''UPDATE alerts SET acknowledged=1
-                        WHERE device_id=? AND type='device_offline' AND acknowledged=0''', (did,))
+                reading = generate_reading(thresholds, now_ts)
+                reading['energy'] = round(add_cumulative_energy(did, reading['power']), 6)
+                post_reading({'device_id': did, **reading})
+        except Exception as e:
+            logger.error('Simulator error: %s', e)
+        time.sleep(SIM_INTERVAL)
+
+def check_offline_devices(conn, now_ts):
+    """Insert (or auto-acknowledge) device_offline alerts based on last seen time.
+
+    Runs on the backend so it works with both the embedded simulator and a
+    separate simulator.py process (spec Ch. 4 §4.3.3, OFFLINE_SECONDS = 30s).
+    Returns True if any new alert was inserted.
+    """
+    changed = False
+    all_devices = conn.execute('SELECT id FROM devices').fetchall()
+    for dev in all_devices:
+        did = dev['id']
+        last_seen = last_device_seen.get(did)
+        if last_seen and (now_ts - last_seen).total_seconds() > OFFLINE_SECONDS:
+            existing = conn.execute(
+                "SELECT id FROM alerts WHERE device_id=? AND type='device_offline' AND acknowledged=0",
+                (did,)).fetchone()
+            if not existing:
+                conn.execute('''INSERT INTO alerts (device_id, type, parameter, message, severity, value, threshold)
+                    VALUES (?,?,?,?,?,?,?)''',
+                    (did, 'device_offline', 'device',
+                     f'Device {did} is offline — no reading for {OFFLINE_SECONDS}s',
+                     'critical', int((now_ts - last_seen).total_seconds()), OFFLINE_SECONDS))
+                changed = True
+        elif last_seen:
+            # Device is back online — auto-acknowledge any open offline alerts
+            conn.execute('''UPDATE alerts SET acknowledged=1
+                WHERE device_id=? AND type='device_offline' AND acknowledged=0''', (did,))
+    return changed
+
+def offline_monitor():
+    """Background thread: raises device-offline alerts when a device stops
+    sending readings (runs on the backend, independent of the simulator)."""
+    global SIMULATOR_RUNNING
+    while SIMULATOR_RUNNING:
+        try:
+            conn = get_db()
+            check_offline_devices(conn, datetime.now())
             conn.commit()
             conn.close()
         except Exception as e:
-            logger.error('Simulator error: %s', e)
+            logger.error('Offline monitor error: %s', e)
         time.sleep(SIM_INTERVAL)
 
 def prune_old_data():
@@ -689,7 +750,7 @@ def api_export_alerts():
         JOIN devices d ON a.device_id=d.id
         WHERE a.created_at >= ? ORDER BY a.created_at DESC''', (cutoff,)).fetchall()
     conn.close()
-    fieldnames = ['id', 'device_id', 'device_name', 'type', 'message', 'severity',
+    fieldnames = ['id', 'device_id', 'device_name', 'type', 'parameter', 'message', 'severity',
                   'value', 'threshold', 'acknowledged', 'created_at']
     return _csv_response(rows, f'alerts_{hours}h.csv', fieldnames)
 
@@ -702,16 +763,28 @@ def _bucket_expr(period):
     return "date(timestamp)"
 
 def _report_rows(conn, period, cutoff, rate):
-    """Aggregated energy/cost per period, ready for both JSON and CSV use."""
+    """Aggregated energy/cost per period, ready for both JSON and CSV use.
+
+    Energy is stored as cumulative kWh (spec Ch. 4 §4.4), so the energy used in
+    a bucket is the per-device (MAX - MIN) of the cumulative readings, summed
+    across devices.
+    """
     bucket = _bucket_expr(period)
-    rows = conn.execute(f'''SELECT {bucket} AS label,
-            ROUND(SUM(energy), 3) AS energy_kwh,
-            ROUND(MAX(power), 1) AS peak_power,
-            COUNT(*) AS reading_count
-        FROM readings WHERE timestamp >= ? GROUP BY label ORDER BY label ASC''', (cutoff,)).fetchall()
-    return [{'label': r['label'], 'energy_kwh': r['energy_kwh'],
-             'cost': round(r['energy_kwh'] * rate, 2),
-             'peak_power': r['peak_power'], 'reading_count': r['reading_count']} for r in rows]
+    rows = conn.execute(f'''SELECT {bucket} AS label, device_id,
+            MAX(energy) AS mx, MIN(energy) AS mn,
+            MAX(power) AS peak_power, COUNT(*) AS reading_count
+        FROM readings WHERE timestamp >= ? AND energy IS NOT NULL
+        GROUP BY label, device_id ORDER BY label ASC''', (cutoff,)).fetchall()
+    agg = {}
+    for r in rows:
+        d = agg.setdefault(r['label'], {'energy_kwh': 0.0, 'peak_power': 0.0, 'reading_count': 0})
+        d['energy_kwh'] += max(0.0, (r['mx'] or 0.0) - (r['mn'] or 0.0))
+        d['peak_power'] = max(d['peak_power'], r['peak_power'] or 0.0)
+        d['reading_count'] += r['reading_count']
+    return [{'label': label, 'energy_kwh': round(v['energy_kwh'], 3),
+             'cost': round(v['energy_kwh'] * rate, 2),
+             'peak_power': round(v['peak_power'], 1), 'reading_count': v['reading_count']}
+            for label, v in sorted(agg.items())]
 
 @app.route('/api/reports')
 @login_required
@@ -726,9 +799,11 @@ def api_reports():
     rate = float(get_setting(conn, 'energy_rate', str(ENERGY_RATE_PER_KWH)))
     currency = get_setting(conn, 'currency', CURRENCY_SYMBOL)
     data = _report_rows(conn, period, cutoff, rate)
-    top_devices = conn.execute('''SELECT d.name, ROUND(SUM(r.energy), 3) AS energy_kwh
+    top_devices = conn.execute('''SELECT d.name,
+            (MAX(r.energy) - MIN(r.energy)) AS energy_kwh
         FROM readings r JOIN devices d ON r.device_id=d.id
-        WHERE r.timestamp >= ? GROUP BY d.id ORDER BY energy_kwh DESC LIMIT 5''', (cutoff,)).fetchall()
+        WHERE r.timestamp >= ? AND r.energy IS NOT NULL
+        GROUP BY d.id ORDER BY energy_kwh DESC LIMIT 5''', (cutoff,)).fetchall()
     conn.close()
     total_energy = round(sum(r['energy_kwh'] for r in data), 3)
     return jsonify({
@@ -736,8 +811,8 @@ def api_reports():
         'rows': data,
         'totals': {'energy_kwh': total_energy, 'cost': round(total_energy * rate, 2),
                    'peak_power': max((r['peak_power'] for r in data), default=0)},
-        'top_devices': [{'name': d['name'], 'energy_kwh': d['energy_kwh'],
-                         'cost': round(d['energy_kwh'] * rate, 2)} for d in top_devices]
+        'top_devices': [{'name': d['name'], 'energy_kwh': round(max(0.0, d['energy_kwh'] or 0.0), 3),
+                         'cost': round(max(0.0, d['energy_kwh'] or 0.0) * rate, 2)} for d in top_devices]
     })
 
 @app.route('/api/reports/export')
@@ -805,7 +880,7 @@ def api_ingest_reading():
     if not device_id:
         return jsonify({'error': 'device_id required'}), 400
     conn = get_db()
-    device = conn.execute('''SELECT id, power_threshold, voltage_min, voltage_max,
+    device = conn.execute('''SELECT id, name, power_threshold, voltage_min, voltage_max,
         current_max, temp_min, temp_max FROM devices WHERE id=?''', (device_id,)).fetchone()
     if not device:
         conn.close()
@@ -823,10 +898,25 @@ def api_ingest_reading():
     for alert in evaluate_alerts(data.get('voltage'), data.get('current'),
                                  data.get('power'), data.get('temperature'), thresholds):
         if not alert_dedup_window(conn, device_id, alert['type']):
-            conn.execute('''INSERT INTO alerts (device_id, type, message, severity, value, threshold)
-                VALUES (?,?,?,?,?,?)''',
-                (device_id, alert['type'], alert['message'], alert['severity'],
+            conn.execute('''INSERT INTO alerts (device_id, type, parameter, message, severity, value, threshold)
+                VALUES (?,?,?,?,?,?,?)''',
+                (device_id, alert['type'], alert['parameter'], alert['message'], alert['severity'],
                  alert['value'], alert['threshold']))
+            maybe_email_alert(conn, device['name'], alert)
+    # ML-style anomaly detection: flag readings that deviate strongly from the
+    # device's recent power baseline (rolling z-score)
+    try:
+        power_val = float(data.get('power'))
+    except (TypeError, ValueError):
+        power_val = None
+    if power_val is not None:
+        anomaly = detect_power_anomaly(device_id, power_val)
+        if anomaly and not alert_dedup_window(conn, device_id, anomaly['type']):
+            conn.execute('''INSERT INTO alerts (device_id, type, parameter, message, severity, value, threshold)
+                VALUES (?,?,?,?,?,?,?)''',
+                (device_id, anomaly['type'], anomaly['parameter'], anomaly['message'], anomaly['severity'],
+                 anomaly['value'], anomaly['threshold']))
+            maybe_email_alert(conn, device['name'], anomaly)
     conn.commit()
     last_id = conn.execute('SELECT last_insert_rowid() as id').fetchone()['id']
     conn.close()
@@ -1060,8 +1150,13 @@ def api_summary():
     hour_cutoff = (now - timedelta(hours=1)).isoformat()
     offline_cutoff = (now - timedelta(seconds=OFFLINE_SECONDS)).isoformat()
     conn = get_db()
-    total_energy = conn.execute('SELECT SUM(energy) as e FROM readings WHERE timestamp >= ?',
-                                (day_cutoff,)).fetchone()['e'] or 0
+    total_energy = 0.0
+    # Energy is cumulative (spec Ch. 4 §4.4): consumption in the window is the
+    # per-device (MAX - MIN) of the cumulative readings, summed across devices.
+    for r in conn.execute('''SELECT MAX(energy) AS mx, MIN(energy) AS mn
+        FROM readings WHERE timestamp >= ? AND energy IS NOT NULL
+        GROUP BY device_id''', (day_cutoff,)).fetchall():
+        total_energy += max(0.0, (r['mx'] or 0.0) - (r['mn'] or 0.0))
     device_count = conn.execute('SELECT COUNT(*) as c FROM devices WHERE is_active=1').fetchone()['c']
     offline_count = conn.execute('''SELECT COUNT(*) as c FROM devices d
         WHERE d.is_active=1 AND NOT EXISTS (
@@ -1093,17 +1188,18 @@ def api_usage_ranking():
     hours = request.args.get('hours', 24, type=int)
     cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
     conn = get_db()
-    rows = conn.execute('''SELECT d.id, d.name, d.location, SUM(r.energy) as energy_kwh,
+    rows = conn.execute('''SELECT d.id, d.name, d.location,
+            (MAX(r.energy) - MIN(r.energy)) as energy_kwh,
             MAX(r.power) as peak_power
         FROM readings r JOIN devices d ON r.device_id=d.id
-        WHERE r.timestamp >= ?
+        WHERE r.timestamp >= ? AND r.energy IS NOT NULL
         GROUP BY d.id ORDER BY energy_kwh DESC''', (cutoff,)).fetchall()
     energy_rate = float(get_setting(conn, 'energy_rate', str(ENERGY_RATE_PER_KWH)))
     conn.close()
     return jsonify([{
         'device_id': r['id'], 'name': r['name'], 'location': r['location'],
-        'energy_kwh': round(r['energy_kwh'] or 0, 3),
-        'cost': round((r['energy_kwh'] or 0) * energy_rate, 3),
+        'energy_kwh': round(max(0.0, r['energy_kwh'] or 0.0), 3),
+        'cost': round(max(0.0, r['energy_kwh'] or 0.0) * energy_rate, 3),
         'peak_power': round(r['peak_power'] or 0, 1)
     } for r in rows])
 
@@ -1114,16 +1210,20 @@ def api_usage_trend():
     days = max(1, min(90, days))
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     conn = get_db()
-    rows = conn.execute('''SELECT substr(timestamp, 1, 10) as day, SUM(energy) as energy_kwh
-        FROM readings WHERE timestamp >= ?
-        GROUP BY day ORDER BY day ASC''', (cutoff,)).fetchall()
+    rows = conn.execute('''SELECT substr(timestamp, 1, 10) as day, device_id,
+            (MAX(energy) - MIN(energy)) as energy_kwh
+        FROM readings WHERE timestamp >= ? AND energy IS NOT NULL
+        GROUP BY day, device_id ORDER BY day ASC''', (cutoff,)).fetchall()
     energy_rate = float(get_setting(conn, 'energy_rate', str(ENERGY_RATE_PER_KWH)))
     conn.close()
+    by_day = {}
+    for r in rows:
+        by_day[r['day']] = by_day.get(r['day'], 0.0) + max(0.0, r['energy_kwh'] or 0.0)
     return jsonify([{
-        'day': r['day'],
-        'energy_kwh': round(r['energy_kwh'] or 0, 3),
-        'cost': round((r['energy_kwh'] or 0) * energy_rate, 3)
-    } for r in rows])
+        'day': day,
+        'energy_kwh': round(v, 3),
+        'cost': round(v * energy_rate, 3)
+    } for day, v in sorted(by_day.items())])
 
 @socketio.on('connect')
 def handle_connect():
@@ -1163,9 +1263,17 @@ if __name__ == '__main__':
         init_db()
         logger.info('Pruning data older than %d days...', RETENTION_DAYS)
         prune_old_data()
-        logger.info('Starting simulator thread...')
-        sim_thread = threading.Thread(target=simulate_readings, daemon=True)
-        sim_thread.start()
+        # Offline monitoring runs on the backend regardless of where the
+        # simulator lives (embedded thread or standalone simulator.py).
+        logger.info('Starting offline monitor thread...')
+        offline_thread = threading.Thread(target=offline_monitor, daemon=True)
+        offline_thread.start()
+        if EMBEDDED_SIMULATOR:
+            logger.info('Starting embedded simulator thread...')
+            sim_thread = threading.Thread(target=simulate_readings, daemon=True)
+            sim_thread.start()
+        else:
+            logger.info('Embedded simulator disabled (EMBEDDED_SIMULATOR=0); run simulator.py separately')
         logger.info('Starting broadcast thread...')
         bcast_thread = threading.Thread(target=broadcast_readings, daemon=True)
         bcast_thread.start()

@@ -12,9 +12,19 @@ pinned: false
 
 A Flask + Flask-SocketIO web application that monitors 20 simulated smart
 meters in a home. It generates live readings, detects threshold violations
-(over-voltage, under-voltage, over-current, high power, temperature), flags
-power anomalies with a rolling z-score, sends optional email alerts, and
-produces daily/weekly/monthly energy & cost reports with CSV export.
+(over-voltage, under-voltage, over-current, high power, temperature, device
+offline), flags power anomalies with a rolling z-score, sends optional email
+alerts, and produces daily/weekly/monthly energy & cost reports with CSV export.
+
+## Architecture
+
+The device simulator (`simulator.py`) generates realistic readings and sends
+each one as JSON over HTTP to the backend's `/api/reading` endpoint. The
+backend stores the reading, runs the alert engine and anomaly detection,
+broadcasts new readings/alerts to all dashboard clients over WebSocket, and a
+backend monitor thread flags devices that stop reporting. By default the
+simulator runs embedded inside `app.py`; to run it as a separate process, set
+`EMBEDDED_SIMULATOR=0` on the server and start `python simulator.py`.
 
 ## Features
 
@@ -35,6 +45,13 @@ python app.py                 # -> http://localhost:5000
 docker compose up --build
 ```
 
+Run the simulator as a separate process (optional):
+
+```bash
+EMBEDDED_SIMULATOR=0 python app.py   # backend, no built-in simulator
+python simulator.py                  # standalone simulator process
+```
+
 ## Configuration (environment variables)
 
 | Variable | Default | Purpose |
@@ -47,6 +64,8 @@ docker compose up --build
 | `SMTP_HOST/USER/PASSWORD` | (empty) | SMTP server for email alerts |
 | `PORT` | `5000` | HTTP port |
 | `HOST` | `0.0.0.0` | Bind address |
+| `SIMULATOR_SERVER_URL` | `http://127.0.0.1:5000` | Backend URL the simulator POSTs readings to |
+| `EMBEDDED_SIMULATOR` | `1` | `1` = run simulator in-process, `0` = use `simulator.py` |
 
 ## Tests
 
