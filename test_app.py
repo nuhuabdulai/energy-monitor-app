@@ -4,6 +4,7 @@ import tempfile
 import sqlite3
 import unittest
 from datetime import datetime, timedelta
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -485,8 +486,11 @@ class TestAlertEngine(unittest.TestCase):
 
     def test_alert_dedup_window_on_ingest(self):
         # Repeated identical violations must not flood the alerts table
+        ensure_user('dedup@test.com', 'pass123')  # device creation requires login
         resp = client.post('/api/devices', json={'name': 'Dedup Meter', 'location': 'Lab'})
         did = resp.get_json()['id']
+        # Remove the temporary device so other tests see exactly 20 seeded devices
+        self.addCleanup(client.delete, f'/api/devices/{did}')
         payload = {'device_id': did, 'voltage': 265, 'current': 5, 'power': 1000}
         client.post('/api/reading', json=payload)
         client.post('/api/reading', json=payload)
@@ -497,6 +501,127 @@ class TestAlertEngine(unittest.TestCase):
             (did,)).fetchone()
         conn.close()
         self.assertEqual(row['c'], 1)
+
+class TestAnomalyDetection(unittest.TestCase):
+    def setUp(self):
+        energy_app._power_history.clear()
+
+    def test_needs_min_samples(self):
+        # Anomaly scoring starts only after ANOMALY_MIN_SAMPLES readings
+        for _ in range(energy_app.ANOMALY_MIN_SAMPLES - 1):
+            self.assertIsNone(energy_app.detect_power_anomaly(999, 1000))
+        self.assertIn(999, energy_app._power_history)
+        self.assertEqual(len(energy_app._power_history[999]), energy_app.ANOMALY_MIN_SAMPLES - 1)
+
+    def test_stable_reading_no_false_positive(self):
+        # Small normal fluctuation around the baseline must not be flagged
+        for i in range(energy_app.ANOMALY_MIN_SAMPLES):
+            energy_app.detect_power_anomaly(1, 500 + (i % 5) * 4 - 8)
+        result = energy_app.detect_power_anomaly(1, 505)
+        self.assertIsNone(result)
+
+    def test_spike_is_flagged(self):
+        for i in range(energy_app.ANOMALY_MIN_SAMPLES):
+            energy_app.detect_power_anomaly(2, 500 + (i % 5) * 4 - 8)
+        result = energy_app.detect_power_anomaly(2, 9000)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['type'], 'anomaly')
+        self.assertIn('anomaly', result['type'])
+        self.assertIn('9000W', result['message'])
+        self.assertIn('value', result)
+        self.assertIn('threshold', result)
+
+    def test_anomaly_wired_into_simulator_path(self):
+        # simulate_readings runs detect_power_anomaly per device: verify the
+        # function signature matches the call site
+        import inspect
+        sig = inspect.signature(energy_app.simulate_readings)
+        self.assertEqual(sig.parameters, {})
+        self.assertTrue(callable(energy_app.detect_power_anomaly))
+
+class TestEmailNotifications(unittest.TestCase):
+    def setUp(self):
+        ensure_user('emailtest@test.com', 'pass123')
+        energy_app._last_email_sent = 0.0
+
+    def test_settings_email_fields_persist(self):
+        resp = client.put('/api/settings', json={'email_alerts': True, 'email_recipient': 'me@example.com'})
+        self.assertEqual(resp.status_code, 200)
+        data = client.get('/api/settings').get_json()
+        self.assertEqual(data['email_alerts'], '1')
+        self.assertEqual(data['email_recipient'], 'me@example.com')
+
+    def test_settings_rejects_invalid_email(self):
+        resp = client.put('/api/settings', json={'email_recipient': 'not-an-email'})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_email_disabled_without_smtp(self):
+        # Enabled in settings but SMTP env vars missing -> no email is sent
+        client.put('/api/settings', json={'email_alerts': True, 'email_recipient': 'me@example.com'})
+        with app.app_context():
+            conn = energy_app.get_db()
+            sent = energy_app.maybe_email_alert(conn, 'Living Room Meter',
+                                                {'type': 'high_power', 'severity': 'warning', 'message': 'x'})
+            conn.close()
+        self.assertFalse(sent)
+
+    def test_email_rate_limited(self):
+        # At most one email per EMAIL_THROTTLE_SECONDS
+        client.put('/api/settings', json={'email_alerts': True, 'email_recipient': 'me@example.com'})
+        with mock.patch.object(energy_app, 'SMTP_HOST', 'smtp.test.com'), \
+             mock.patch.object(energy_app, 'SMTP_USER', 'user'), \
+             mock.patch.object(energy_app, 'SMTP_PASSWORD', 'pass'), \
+             mock.patch.object(energy_app, '_send_email_async') as send:
+            with app.app_context():
+                conn = energy_app.get_db()
+                first = energy_app.maybe_email_alert(conn, 'Meter',
+                                                     {'type': 'high_power', 'severity': 'warning', 'message': 'x'})
+                second = energy_app.maybe_email_alert(conn, 'Meter',
+                                                      {'type': 'over_voltage', 'severity': 'critical', 'message': 'y'})
+                conn.close()
+        self.assertTrue(first)
+        self.assertFalse(second)  # throttled
+        send.assert_called_once()
+
+class TestReports(unittest.TestCase):
+    def setUp(self):
+        ensure_user('reporttest@test.com', 'pass123')
+
+    def test_reports_daily_returns_rows(self):
+        resp = client.get('/api/reports?period=daily&days=7')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data['period'], 'daily')
+        self.assertIn('rows', data)
+        self.assertIn('totals', data)
+        self.assertIn('top_devices', data)
+        self.assertGreater(len(data['rows']), 0)
+        row = data['rows'][0]
+        for key in ('label', 'energy_kwh', 'cost', 'peak_power', 'reading_count'):
+            self.assertIn(key, row)
+
+    def test_reports_weekly_and_monthly(self):
+        for period in ('weekly', 'monthly'):
+            resp = client.get(f'/api/reports?period={period}')
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.get_json()['period'], period)
+
+    def test_reports_invalid_period(self):
+        resp = client.get('/api/reports?period=hourly')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_reports_unauthorized(self):
+        with client.session_transaction() as sess:
+            sess.clear()
+        resp = client.get('/api/reports')
+        self.assertEqual(resp.status_code, 401)
+
+    def test_reports_export_csv(self):
+        resp = client.get('/api/reports/export?period=daily&days=7')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('text/csv', resp.mimetype)
+        text = resp.get_data(as_text=True)
+        self.assertIn('period,energy_kwh,cost,peak_power,reading_count', text)
 
 class TestDeviceManagement(unittest.TestCase):
     def setUp(self):

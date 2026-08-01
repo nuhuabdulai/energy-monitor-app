@@ -184,6 +184,7 @@
     <a class="nav active" data-page="overview"><span>📊</span><span>Overview</span></a>
     <a class="nav" data-page="devices"><span>📱</span><span>Devices</span></a>
     <a class="nav" data-page="alerts"><span>🔔</span><span>Alerts</span></a>
+    <a class="nav" data-page="reports"><span>📈</span><span>Reports</span></a>
     <a class="nav" data-page="settings"><span>⚙️</span><span>Settings</span></a>
     <a class="nav" href="/map"><span>📍</span><span>Device Map</span></a>
     <button class="theme-toggle" id="themeToggle">🌓 <span id="themeLabel">Dark</span></button>
@@ -290,6 +291,46 @@
         </div>
       </div>
 
+      <!-- Reports Page -->
+      <div class="page" id="pageReports">
+        <div class="stat-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px;">
+          <div class="stat-card"><div class="label" id="reportPeriodLabel">Total Energy</div><div class="value blue" id="repEnergy">-- kWh</div></div>
+          <div class="stat-card"><div class="label">Est. Cost</div><div class="value yellow" id="repCost">--</div></div>
+          <div class="stat-card"><div class="label">Peak Power</div><div class="value blue" id="repPeak">-- W</div></div>
+        </div>
+        <div class="chart-toolbar">
+          <div class="range-toggle" id="reportPeriodToggle">
+            <button data-period="daily" class="active">Daily</button>
+            <button data-period="weekly">Weekly</button>
+            <button data-period="monthly">Monthly</button>
+          </div>
+          <button class="btn" id="exportReportBtn">Export Report (CSV)</button>
+        </div>
+        <div class="overview-grid">
+          <div class="chart-container">
+            <h3>Energy &amp; Cost by Period</h3>
+            <div class="chart-wrapper"><canvas id="reportChart"></canvas></div>
+          </div>
+          <div class="chart-container">
+            <h3>Top Devices by Energy</h3>
+            <div class="table-wrap" style="max-height:320px;overflow:auto;">
+              <table class="alert-table">
+                <thead><tr><th>Device</th><th>Energy (kWh)</th><th>Cost</th></tr></thead>
+                <tbody id="reportTopBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="chart-container" style="margin-top:16px;">
+          <div class="table-wrap">
+            <table class="alert-table">
+              <thead><tr><th>Period</th><th>Energy (kWh)</th><th>Cost</th><th>Peak Power</th><th>Readings</th></tr></thead>
+              <tbody id="reportBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <!-- Settings Page -->
       <div class="page" id="pageSettings">
         <div class="chart-container" style="margin-bottom:16px;">
@@ -302,6 +343,14 @@
             <div class="form-group" style="margin:0;min-width:180px;">
               <label for="setCurrency" style="display:block;font-size:0.82rem;color:var(--text-dim);margin-bottom:6px;">Currency Symbol</label>
               <input type="text" id="setCurrency" maxlength="16" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);outline:none;">
+            </div>
+            <div class="form-group" style="margin:0;min-width:200px;">
+              <label for="setEmailRecipient" style="display:block;font-size:0.82rem;color:var(--text-dim);margin-bottom:6px;">Alert Email Recipient</label>
+              <input type="email" id="setEmailRecipient" placeholder="you@example.com" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);outline:none;">
+            </div>
+            <div class="form-group" style="margin:0;display:flex;align-items:center;gap:8px;align-self:flex-end;padding-bottom:10px;">
+              <input type="checkbox" id="setEmailAlerts" style="width:18px;height:18px;accent-color:var(--accent);">
+              <label for="setEmailAlerts" style="font-size:0.85rem;color:var(--text-dim);cursor:pointer;">Email me on alerts</label>
             </div>
             <div style="align-self:flex-end;">
               <button class="btn btn-primary" id="saveGlobalBtn">Save</button>
@@ -392,6 +441,7 @@ let voltageChartInstance = null;
 let tempChartInstance = null;
 let humidityChartInstance = null;
 let trendChartInstance = null;
+let reportChartInstance = null;
 let allDevices = [];
 let allAlerts = [];
 let chartDeviceId = 'all';
@@ -828,6 +878,18 @@ function filterAlerts() {
   else renderAlerts(allAlerts.filter(a => a.device_id == val));
 }
 
+// Human-readable names for alert types
+const ALERT_LABELS = {
+  over_voltage: 'Over Voltage',
+  under_voltage: 'Under Voltage',
+  over_current: 'Over Current',
+  high_power: 'High Power',
+  high_temperature: 'High Temperature',
+  low_temperature: 'Low Temperature',
+  device_offline: 'Device Offline',
+  anomaly: 'Usage Anomaly'
+};
+
 function renderAlerts(alerts) {
   const body = $('alertBody');
   if (alerts.length === 0) {
@@ -839,7 +901,7 @@ function renderAlerts(alerts) {
     return `<tr>
       <td style="color:var(--text-faint);font-size:0.78rem;white-space:nowrap;">${new Date(a.created_at).toLocaleString()}</td>
       <td>${esc(a.device_name || 'Device '+a.device_id)}</td>
-      <td>${esc(a.type)}</td>
+      <td>${esc(ALERT_LABELS[a.type] || a.type)}</td>
       <td>${a.value !== null && a.value !== undefined ? fnum(a.value, 1) : '--'}</td>
       <td>${a.threshold !== null && a.threshold !== undefined ? fnum(a.threshold, 0) : '--'}</td>
       <td>${esc(a.message)}</td>
@@ -861,6 +923,8 @@ function renderAlerts(alerts) {
 }
 
 // ---------- toasts ----------
+// Alert notifications auto-dismiss after 2 minutes (120000 ms)
+const TOAST_AUTO_DISMISS_MS = 120000;
 function showToast(title, message, severity) {
   const el = document.createElement('div');
   el.className = 'toast ' + (severity === 'critical' ? 'critical' : '');
@@ -869,7 +933,8 @@ function showToast(title, message, severity) {
   $('toastContainer').appendChild(el);
   const close = () => el.remove();
   el.querySelector('.toast-close').addEventListener('click', close);
-  setTimeout(close, 8000);
+  // Auto-hide after 2 minutes so the notification clears itself
+  setTimeout(close, TOAST_AUTO_DISMISS_MS);
 }
 
 // ---------- export ----------
@@ -895,6 +960,8 @@ async function loadSettings() {
     const data = await res.json();
     $('setRate').value = data.energy_rate;
     $('setCurrency').value = data.currency;
+    $('setEmailRecipient').value = data.email_recipient || '';
+    $('setEmailAlerts').checked = data.email_alerts === '1';
     $('thresholdBody').innerHTML = data.devices.map(d => `
       <tr>
         <td>${esc(d.name)} <span style="color:var(--text-faint);font-size:0.75rem;">${esc(d.location)}</span></td>
@@ -914,7 +981,12 @@ $('saveGlobalBtn').addEventListener('click', async () => {
   if (!(rate > 0)) { $('setGlobalMsg').textContent = 'Enter a valid energy rate'; $('setGlobalMsg').style.color = 'var(--red)'; return; }
   const res = await fetch('/api/settings', {
     method:'PUT', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ energy_rate: rate, currency: $('setCurrency').value.trim() })
+    body: JSON.stringify({
+      energy_rate: rate,
+      currency: $('setCurrency').value.trim(),
+      email_alerts: $('setEmailAlerts').checked,
+      email_recipient: $('setEmailRecipient').value.trim()
+    })
   });
   if (res.ok) {
     $('setGlobalMsg').textContent = 'Saved successfully';
@@ -963,6 +1035,73 @@ qq('#rangeToggle button').forEach(btn => {
   });
 });
 
+// ---------- reports & cost analytics ----------
+let reportPeriod = 'daily';
+let reportCurrency = '';
+async function loadReports() {
+  try {
+    const res = await fetch('/api/reports?period=' + reportPeriod + '&days=30');
+    const data = await res.json();
+    reportCurrency = data.currency;
+    const t = data.totals;
+    $('repEnergy').textContent = fnum(t.energy_kwh, 2) + ' kWh';
+    $('repCost').textContent = reportCurrency + fnum(t.cost, 2);
+    $('repPeak').textContent = fnum(t.peak_power, 0) + ' W';
+    $('reportPeriodLabel').textContent = 'Total Energy (last 30 days)';
+    const labels = data.rows.map(r => String(r.label));
+    const energy = data.rows.map(r => r.energy_kwh);
+    const ctx = document.getElementById('reportChart').getContext('2d');
+    if (reportChartInstance) reportChartInstance.destroy();
+    reportChartInstance = new Chart(ctx, {
+      type: 'bar',
+      data: { labels, datasets: [{
+        label: 'Energy (kWh)',
+        data: energy,
+        backgroundColor: 'rgba(59,130,246,0.55)',
+        borderColor: cssVar('--accent'),
+        borderWidth: 1, borderRadius: 4
+      }]},
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: cssVar('--text-faint'), maxRotation: 60, minRotation: 30 }, grid: { color: cssVar('--bg-3') } },
+          y: { ticks: { color: cssVar('--text-faint') }, grid: { color: cssVar('--bg-3') } }
+        }
+      }
+    });
+    $('reportBody').innerHTML = data.rows.length === 0
+      ? '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text-faint);">No data for this period</td></tr>'
+      : data.rows.map(r => `<tr>
+          <td>${esc(r.label)}</td>
+          <td>${fnum(r.energy_kwh, 3)}</td>
+          <td>${reportCurrency}${fnum(r.cost, 2)}</td>
+          <td>${fnum(r.peak_power, 0)} W</td>
+          <td>${r.reading_count}</td>
+        </tr>`).join('');
+    $('reportTopBody').innerHTML = data.top_devices.length === 0
+      ? '<tr><td colspan="3" style="text-align:center;padding:20px;color:var(--text-faint);">No data</td></tr>'
+      : data.top_devices.map(d => `<tr>
+          <td>${esc(d.name)}</td>
+          <td>${fnum(d.energy_kwh, 3)}</td>
+          <td>${reportCurrency}${fnum(d.cost, 2)}</td>
+        </tr>`).join('');
+  } catch(e) {}
+}
+
+qq('#reportPeriodToggle button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    qq('#reportPeriodToggle button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    reportPeriod = btn.getAttribute('data-period');
+    loadReports();
+  });
+});
+
+$('exportReportBtn').addEventListener('click', () => {
+  window.location.href = '/api/reports/export?period=' + reportPeriod + '&days=30';
+});
+
 // ---------- socket events ----------
 // Throttle chart reloads so rapid WebSocket bursts don't rebuild charts every second
 function throttledChartReload() {
@@ -997,6 +1136,7 @@ loadDevices();
 loadAlerts();
 loadChartData();
 loadTrend();
+loadReports();
 loadRanking();
 loadSettings();
 

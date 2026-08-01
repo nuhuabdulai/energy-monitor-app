@@ -4,11 +4,14 @@ import json
 import csv
 import io
 import random
+import smtplib
+from collections import deque
+from email.message import EmailMessage
 import math
 import threading
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 from flask import Flask, request, jsonify, session, redirect, render_template, Response
@@ -42,10 +45,26 @@ def login_lockout_remaining(email):
 ENERGY_RATE_PER_KWH = float(os.environ.get('ENERGY_RATE', '0.80'))
 CURRENCY_SYMBOL = os.environ.get('CURRENCY_SYMBOL', 'GH₵')
 
+# Email alert notifications (SMTP via stdlib; configure via env vars)
+SMTP_HOST = os.environ.get('SMTP_HOST', '')
+SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
+SMTP_USER = os.environ.get('SMTP_USER', '')
+SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD', '')
+EMAIL_FROM = os.environ.get('EMAIL_FROM', SMTP_USER)
+EMAIL_THROTTLE_SECONDS = int(os.environ.get('EMAIL_THROTTLE_SECONDS', '600'))
+_email_lock = threading.Lock()
+_last_email_sent = 0.0
+
 # Simulation & retention tuning
 SIM_INTERVAL = float(os.environ.get('SIM_INTERVAL', '3'))       # seconds between readings
 RETENTION_DAYS = int(os.environ.get('RETENTION_DAYS', '30'))    # keep readings for N days
 ALERT_DEDUP_SECONDS = int(os.environ.get('ALERT_DEDUP_SECONDS', '300'))  # min gap between same alert type
+
+# ML-style anomaly detection: rolling z-score over each device's recent power history
+ANOMALY_WINDOW = int(os.environ.get('ANOMALY_WINDOW', '60'))          # readings kept per device
+ANOMALY_MIN_SAMPLES = int(os.environ.get('ANOMALY_MIN_SAMPLES', '10'))  # window size before scoring
+ANOMALY_ZSCORE = float(os.environ.get('ANOMALY_ZSCORE', '3.0'))        # sigma threshold for a flag
+_power_history = {}  # device_id -> deque of recent power readings
 
 # Default alert thresholds (per-device overrides are stored in the devices table).
 # Values follow the project report (Ch. 5 findings): high-power >5000W and
@@ -79,7 +98,7 @@ app = Flask(__name__, template_folder=os.path.join(BASE_DIR, 'templates'),
 app.config['SECRET_KEY'] = SECRET_KEY
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-socketio = SocketIO(app, cors_allowed_origins='http://127.0.0.1:5000', async_mode='threading')
+socketio = SocketIO(app, async_mode='threading')
 CORS(app, origins=['http://127.0.0.1:5000', 'http://localhost:5000'])
 
 def get_db():
@@ -163,6 +182,8 @@ def init_db():
     if not conn.execute('SELECT 1 FROM settings LIMIT 1').fetchone():
         conn.execute('INSERT INTO settings (key, value) VALUES (?,?)', ('energy_rate', str(ENERGY_RATE_PER_KWH)))
         conn.execute('INSERT INTO settings (key, value) VALUES (?,?)', ('currency', CURRENCY_SYMBOL))
+        conn.execute('INSERT INTO settings (key, value) VALUES (?,?)', ('email_alerts', '0'))
+        conn.execute('INSERT INTO settings (key, value) VALUES (?,?)', ('email_recipient', ''))
     conn.commit()
     cur = conn.execute('SELECT COUNT(*) as c FROM devices')
     if cur.fetchone()['c'] == 0:
@@ -228,8 +249,14 @@ def get_thresholds(device_row):
 
 def alert_dedup_window(conn, device_id, alert_type, seconds=ALERT_DEDUP_SECONDS):
     """Return True when a recent unacknowledged alert of the same type exists,
-    so the caller can skip inserting a duplicate."""
-    cutoff = (datetime.now() - timedelta(seconds=seconds)).isoformat()
+    so the caller can skip inserting a duplicate.
+
+    Alerts store timestamps with SQLite's datetime('now') (UTC, space-separated,
+    e.g. "2026-08-01 06:00:00"), so the cutoff must use the same format. Using
+    datetime.now().isoformat() here produced "2026-08-01T06:00:00.123456" which
+    sorts AFTER every stored alert and silently defeated the dedup.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).strftime('%Y-%m-%d %H:%M:%S')
     row = conn.execute('''SELECT id FROM alerts
         WHERE device_id=? AND type=? AND created_at >= ?
         ORDER BY id DESC LIMIT 1''', (device_id, alert_type, cutoff)).fetchone()
@@ -278,6 +305,31 @@ def evaluate_alerts(voltage=None, current=None, power=None, temperature=None, th
                            'value': round(temperature, 1), 'threshold': t['temp_min']})
     return alerts
 
+def detect_power_anomaly(device_id, power):
+    """ML-style anomaly detection: rolling z-score over a device's recent power.
+
+    Keeps a per-device rolling window of power readings. Once the window has
+    ANOMALY_MIN_SAMPLES samples, the latest reading is scored against the
+    window's own mean and standard deviation. Readings deviating by more than
+    ANOMALY_ZSCORE standard deviations are flagged as anomalies. The current
+    reading is excluded from the baseline so a spike cannot mask itself.
+    """
+    hist = _power_history.setdefault(device_id, deque(maxlen=ANOMALY_WINDOW))
+    result = None
+    if len(hist) >= ANOMALY_MIN_SAMPLES:
+        values = list(hist)
+        mean = sum(values) / len(values)
+        var = sum((x - mean) ** 2 for x in values) / len(values)
+        std = math.sqrt(var)
+        if std > 1e-6:
+            z = (power - mean) / std
+            if abs(z) >= ANOMALY_ZSCORE:
+                result = {'type': 'anomaly', 'severity': 'warning',
+                          'message': f'Unusual power consumption detected: {power:.0f}W ({z:+.1f}σ from device baseline)',
+                          'value': round(power, 1), 'threshold': round(mean + ANOMALY_ZSCORE * std, 1)}
+    hist.append(power)
+    return result
+
 def simulate_readings():
     """Simulates 20 virtual smart metres every SIM_INTERVAL seconds.
 
@@ -290,7 +342,7 @@ def simulate_readings():
     while SIMULATOR_RUNNING:
         try:
             conn = get_db()
-            devices = conn.execute('''SELECT id, power_threshold, voltage_min, voltage_max,
+            devices = conn.execute('''SELECT id, name, power_threshold, voltage_min, voltage_max,
                 current_max, temp_min, temp_max FROM devices WHERE is_active=1''').fetchall()
             now_ts = datetime.now()
             now = now_ts.isoformat()
@@ -330,6 +382,16 @@ def simulate_readings():
                             VALUES (?,?,?,?,?,?)''',
                             (did, alert['type'], alert['message'], alert['severity'],
                              alert['value'], alert['threshold']))
+                        maybe_email_alert(conn, dev['name'], alert)
+                # ML-style anomaly detection: flag readings that deviate strongly
+                # from the device's recent power baseline (rolling z-score)
+                anomaly = detect_power_anomaly(did, power)
+                if anomaly and not alert_dedup_window(conn, did, anomaly['type']):
+                    conn.execute('''INSERT INTO alerts (device_id, type, message, severity, value, threshold)
+                        VALUES (?,?,?,?,?,?)''',
+                        (did, anomaly['type'], anomaly['message'], anomaly['severity'],
+                         anomaly['value'], anomaly['threshold']))
+                    maybe_email_alert(conn, dev['name'], anomaly)
             # Offline detection for ALL devices (active or not), 30s without a reading
             all_devices = conn.execute('SELECT id FROM devices').fetchall()
             for dev in all_devices:
@@ -630,6 +692,70 @@ def api_export_alerts():
                   'value', 'threshold', 'acknowledged', 'created_at']
     return _csv_response(rows, f'alerts_{hours}h.csv', fieldnames)
 
+def _bucket_expr(period):
+    """SQLite expression that buckets a reading timestamp into a report period."""
+    if period == 'weekly':
+        return "date(timestamp, 'weekday 0', '-6 days')"
+    if period == 'monthly':
+        return "strftime('%Y-%m', timestamp)"
+    return "date(timestamp)"
+
+def _report_rows(conn, period, cutoff, rate):
+    """Aggregated energy/cost per period, ready for both JSON and CSV use."""
+    bucket = _bucket_expr(period)
+    rows = conn.execute(f'''SELECT {bucket} AS label,
+            ROUND(SUM(energy), 3) AS energy_kwh,
+            ROUND(MAX(power), 1) AS peak_power,
+            COUNT(*) AS reading_count
+        FROM readings WHERE timestamp >= ? GROUP BY label ORDER BY label ASC''', (cutoff,)).fetchall()
+    return [{'label': r['label'], 'energy_kwh': r['energy_kwh'],
+             'cost': round(r['energy_kwh'] * rate, 2),
+             'peak_power': r['peak_power'], 'reading_count': r['reading_count']} for r in rows]
+
+@app.route('/api/reports')
+@login_required
+def api_reports():
+    """Historical cost analytics: energy and cost bucketed daily/weekly/monthly."""
+    period = request.args.get('period', 'daily')
+    if period not in ('daily', 'weekly', 'monthly'):
+        return jsonify({'error': 'period must be daily, weekly or monthly'}), 400
+    days = min(request.args.get('days', 30, type=int), 90)
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    conn = get_db()
+    rate = float(get_setting(conn, 'energy_rate', str(ENERGY_RATE_PER_KWH)))
+    currency = get_setting(conn, 'currency', CURRENCY_SYMBOL)
+    data = _report_rows(conn, period, cutoff, rate)
+    top_devices = conn.execute('''SELECT d.name, ROUND(SUM(r.energy), 3) AS energy_kwh
+        FROM readings r JOIN devices d ON r.device_id=d.id
+        WHERE r.timestamp >= ? GROUP BY d.id ORDER BY energy_kwh DESC LIMIT 5''', (cutoff,)).fetchall()
+    conn.close()
+    total_energy = round(sum(r['energy_kwh'] for r in data), 3)
+    return jsonify({
+        'period': period, 'days': days, 'currency': currency, 'rate': rate,
+        'rows': data,
+        'totals': {'energy_kwh': total_energy, 'cost': round(total_energy * rate, 2),
+                   'peak_power': max((r['peak_power'] for r in data), default=0)},
+        'top_devices': [{'name': d['name'], 'energy_kwh': d['energy_kwh'],
+                         'cost': round(d['energy_kwh'] * rate, 2)} for d in top_devices]
+    })
+
+@app.route('/api/reports/export')
+@login_required
+def api_reports_export():
+    period = request.args.get('period', 'daily')
+    if period not in ('daily', 'weekly', 'monthly'):
+        return jsonify({'error': 'period must be daily, weekly or monthly'}), 400
+    days = min(request.args.get('days', 30, type=int), 90)
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    conn = get_db()
+    rate = float(get_setting(conn, 'energy_rate', str(ENERGY_RATE_PER_KWH)))
+    rows = _report_rows(conn, period, cutoff, rate)
+    conn.close()
+    out = [{'period': r['label'], 'energy_kwh': r['energy_kwh'], 'cost': r['cost'],
+            'peak_power': r['peak_power'], 'reading_count': r['reading_count']} for r in rows]
+    return _csv_response(out, f'report_{period}_{days}d.csv',
+                         ['period', 'energy_kwh', 'cost', 'peak_power', 'reading_count'])
+
 @app.route('/api/readings')
 @login_required
 def api_readings():
@@ -782,12 +908,68 @@ def get_setting(conn, key, default=None):
     row = conn.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
     return row['value'] if row else default
 
+def email_notifications_enabled(conn):
+    """True when email alerts are enabled in settings AND SMTP is configured."""
+    if get_setting(conn, 'email_alerts', '0') != '1':
+        return False
+    if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD):
+        logger.warning('Email alerts are enabled but SMTP is not configured '
+                       '(set SMTP_HOST, SMTP_USER, SMTP_PASSWORD env vars)')
+        return False
+    return True
+
+def maybe_email_alert(conn, device_name, alert):
+    """Rate-limited dispatch of an alert email (sent in a background thread).
+
+    At most one email per EMAIL_THROTTLE_SECONDS, so a flapping alert cannot
+    flood the recipient's inbox.
+    """
+    global _last_email_sent
+    if not email_notifications_enabled(conn):
+        return False
+    with _email_lock:
+        now = time.time()
+        if now - _last_email_sent < EMAIL_THROTTLE_SECONDS:
+            return False
+        _last_email_sent = now
+    recipient = get_setting(conn, 'email_recipient', '').strip()
+    if not recipient:
+        return False
+    subject = f'[Smart Energy Monitor] {alert["type"]} alert on {device_name}'
+    body = (f'An alert was raised on device "{device_name}":\n\n'
+            f'  Type:     {alert["type"]}\n'
+            f'  Severity: {alert["severity"]}\n'
+            f'  Message:  {alert["message"]}\n'
+            f'  Time:     {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n\n'
+            'Log in to the dashboard for live details.')
+    threading.Thread(target=_send_email_async, args=(recipient, subject, body), daemon=True).start()
+    logger.info('Alert email queued for %s (%s)', recipient, alert['type'])
+    return True
+
+def _send_email_async(recipient, subject, body):
+    """Deliver the email with smtplib; failures are logged, never crash the app."""
+    try:
+        msg = EmailMessage()
+        msg['Subject'] = subject
+        msg['From'] = EMAIL_FROM or SMTP_USER
+        msg['To'] = recipient
+        msg.set_content(body)
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+        logger.info('Alert email sent to %s', recipient)
+    except Exception as e:
+        logger.error('Failed to send alert email: %s', e)
+
 @app.route('/api/settings')
 @login_required
 def api_settings_get():
     conn = get_db()
     energy_rate = float(get_setting(conn, 'energy_rate', str(ENERGY_RATE_PER_KWH)))
     currency = get_setting(conn, 'currency', CURRENCY_SYMBOL)
+    email_alerts = get_setting(conn, 'email_alerts', '0')
+    email_recipient = get_setting(conn, 'email_recipient', '')
     defaults = get_thresholds(None)
     devices = conn.execute('''SELECT id, name, location, power_threshold, voltage_min,
         voltage_max, current_max, temp_min, temp_max FROM devices''').fetchall()
@@ -795,6 +977,8 @@ def api_settings_get():
     return jsonify({
         'energy_rate': energy_rate,
         'currency': currency,
+        'email_alerts': email_alerts,
+        'email_recipient': email_recipient,
         'defaults': defaults,
         'devices': [{
             'id': d['id'], 'name': d['name'], 'location': d['location'],
@@ -827,6 +1011,19 @@ def api_settings_update():
             conn.execute('INSERT INTO settings (key, value) VALUES (?,?) '
                          'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                          ('currency', currency))
+    if 'email_alerts' in data:
+        val = '1' if data.get('email_alerts') in (True, 1, '1', 'true', 'on') else '0'
+        conn.execute('INSERT INTO settings (key, value) VALUES (?,?) '
+                     'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                     ('email_alerts', val))
+    if 'email_recipient' in data:
+        recipient = str(data.get('email_recipient', '')).strip()[:254]
+        if recipient and '@' not in recipient:
+            conn.close()
+            return jsonify({'error': 'Invalid email address'}), 400
+        conn.execute('INSERT INTO settings (key, value) VALUES (?,?) '
+                     'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                     ('email_recipient', recipient))
     # Per-device threshold overrides
     devices = data.get('devices') or []
     for entry in devices:
@@ -946,9 +1143,12 @@ def broadcast_readings():
                 ORDER BY r.device_id''', (cutoff,)).fetchall()
             if rows:
                 socketio.emit('new_readings', [dict(r) for r in rows])
+            # Alerts use SQLite's datetime('now') (UTC, space-separated), so their
+            # cutoff must match that format, not the readings' ISO format above.
+            alert_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=5)).strftime('%Y-%m-%d %H:%M:%S')
             alerts = conn.execute('''SELECT a.*, d.name as device_name FROM alerts a
                 JOIN devices d ON a.device_id=d.id
-                WHERE a.created_at >= ? AND a.acknowledged=0''', (cutoff,)).fetchall()
+                WHERE a.created_at >= ? AND a.acknowledged=0''', (alert_cutoff,)).fetchall()
             if alerts:
                 socketio.emit('new_alerts', [dict(a) for a in alerts])
             conn.close()
@@ -969,8 +1169,10 @@ if __name__ == '__main__':
         bcast_thread = threading.Thread(target=broadcast_readings, daemon=True)
         bcast_thread.start()
         logger.info('Server starting at http://%s:5000', HOST)
-        socketio.run(app, host=HOST, port=5000, debug=False)
+        # The embedded Werkzeug server is fine for a demo deployment; the
+        # allow_unsafe_werkzeug flag is required by Flask-SocketIO >= 5.4 /
+        # Werkzeug >= 3.0 which refuse to run it in production without this opt-in.
+        socketio.run(app, host=HOST, port=5000, debug=False, allow_unsafe_werkzeug=True)
     except KeyboardInterrupt:
         logger.info('Shutting down...')
-        global SIMULATOR_RUNNING
         SIMULATOR_RUNNING = False
