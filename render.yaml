@@ -4,7 +4,6 @@ services:
   - type: web
     name: energy-monitor
     runtime: docker
-    repo: https://github.com/nuhuabdulai/energy-monitor-app
     plan: free
     autoDeploy: true
     healthCheckPath: /
