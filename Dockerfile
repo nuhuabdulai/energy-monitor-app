@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY --chown=user app.py .
 COPY --chown=user templates ./templates
+COPY --chown=user static ./static
 
 # Writable data directory for the SQLite database
 RUN mkdir -p /data && chmod 777 /data
