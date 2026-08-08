@@ -158,17 +158,6 @@
     .modal .form-row input[type="checkbox"] { width:auto; }
     .modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:18px; }
 
-    /* Toasts */
-    .toast-container { position:fixed; top:70px; right:16px; z-index:200; display:flex; flex-direction:column; gap:10px; max-width:340px; }
-    .toast { background:var(--bg-2); border:1px solid var(--border); border-left:4px solid var(--yellow); border-radius:10px; padding:12px 14px; box-shadow:0 4px 16px var(--shadow); animation:toast-in 0.25s ease; }
-    .toast.critical { border-left-color:var(--red); }
-    .toast .toast-title { font-weight:700; font-size:0.9rem; margin-bottom:3px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
-    .toast.critical .toast-title { color:var(--red); }
-    .toast .toast-msg { font-size:0.82rem; color:var(--text-dim); }
-    .toast .toast-close { background:none; border:none; color:var(--text-faint); font-size:1.1rem; cursor:pointer; line-height:1; }
-    .toast .toast-close:hover { color:var(--text); }
-    @keyframes toast-in { from { opacity:0; transform:translateX(20px); } to { opacity:1; transform:none; } }
-
     /* Mobile sidebar backdrop */
     .backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:35; }
     .backdrop.show { display:block; }
@@ -182,7 +171,6 @@
       .device-grid { grid-template-columns:1fr; }
       .topbar { padding:10px 14px; gap:8px; }
       .topbar h2 { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:0.95rem; }
-      .toast-container { left:14px; right:14px; max-width:none; top:64px; }
       .overview-grid { grid-template-columns:1fr; }
       .modal { padding:18px; }
       .modal .form-row { flex-direction:column; align-items:stretch; }
@@ -467,7 +455,6 @@
   </div>
 </div>
 
-<div class="toast-container" id="toastContainer"></div>
 <div class="backdrop" id="backdrop"></div>
 
 <style>
@@ -529,7 +516,6 @@ $('backdrop').addEventListener('click', closeSidebar);
 
 // ---------- page nav ----------
 function switchPage(page) {
-  currentPage = page;
   qq('.sidebar a.nav').forEach(x => x.classList.remove('active'));
   const link = q(`.sidebar a.nav[data-page="${page}"]`);
   if (link) link.classList.add('active');
@@ -921,25 +907,10 @@ async function refreshAlertCount() {
       badge.textContent = count > 99 ? '99+' : String(count);
       badge.classList.toggle('pulse', count > 0);
     }
-    if (!initialToastShown) {
-      initialToastShown = true;
-      // Seed the seen-set with everything pending on load (so polling never
-      // re-toasts old alerts), but pop the most recent few right away.
-      rows.forEach(a => seenAlertIds.add(a.id));
-      rows.slice(0, 3).forEach(a => popAlert(a));
-    } else {
-      rows.forEach(a => {
-        if (!seenAlertIds.has(a.id)) {
-          seenAlertIds.add(a.id);
-          popAlert(a);
-        }
-      });
-    }
   } catch(e) {}
 }
 
 $('bellBtn').addEventListener('click', () => {
-  requestNotificationPermission();
   switchPage('alerts');
 });
 
@@ -999,52 +970,6 @@ function renderAlerts(alerts) {
       refreshAlertCount();
     });
   });
-}
-
-// ---------- toasts ----------
-// Alert notifications auto-dismiss after 2 minutes (120000 ms)
-const TOAST_AUTO_DISMISS_MS = 120000;
-function showToast(title, message, severity) {
-  const el = document.createElement('div');
-  el.className = 'toast ' + (severity === 'critical' ? 'critical' : '');
-  el.innerHTML = `<div class="toast-title">${title}<button class="toast-close">×</button></div>
-    <div class="toast-msg">${message}</div>`;
-  $('toastContainer').appendChild(el);
-  const close = () => el.remove();
-  el.querySelector('.toast-close').addEventListener('click', close);
-  // Auto-hide after 2 minutes so the notification clears itself
-  setTimeout(close, TOAST_AUTO_DISMISS_MS);
-}
-
-// ---------- notifications ----------
-// Quiet by default: on non-alerts pages alerts only bump the bell badge. Toasts
-// (and browser notifications) fire only while the Alerts page is open.
-let seenAlertIds = new Set();
-let initialToastShown = false;
-let currentPage = 'overview';
-let lastSysNotify = 0;
-
-function popAlert(a) {
-  if (currentPage !== 'alerts') return;
-  const sev = a.severity || 'warning';
-  const title = a.device_name || ('Device ' + a.device_id);
-  const msg = a.message || (ALERT_LABELS[a.type] || a.type);
-  showToast(esc(title), esc(msg), sev);
-  if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
-    const now = Date.now();
-    if (now - lastSysNotify > 30000) {
-      lastSysNotify = now;
-      try {
-        new Notification('⚠ ' + title, { body: msg, icon: '/static/icons/icon-192.png', tag: 'alert-' + a.id });
-      } catch (e) {}
-    }
-  }
-}
-
-function requestNotificationPermission() {
-  if ('Notification' in window && Notification.permission === 'default') {
-    Notification.requestPermission().catch(() => {});
-  }
 }
 
 // ---------- export ----------
@@ -1297,10 +1222,6 @@ socket.on('new_readings', () => {
 
 socket.on('new_alerts', (data) => {
   if (data && data.length > 0) {
-    data.forEach(a => {
-      seenAlertIds.add(a.id);
-      popAlert(a);
-    });
     loadAlerts();
     loadSummary();
     refreshAlertCount();
