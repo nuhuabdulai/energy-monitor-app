@@ -893,10 +893,27 @@ async function refreshAlertCount() {
       badge.textContent = count > 99 ? '99+' : String(count);
       badge.classList.toggle('pulse', count > 0);
     }
+    if (!initialToastShown) {
+      initialToastShown = true;
+      // Seed the seen-set with everything pending on load (so polling never
+      // re-toasts old alerts), but pop the most recent few right away.
+      rows.forEach(a => seenAlertIds.add(a.id));
+      rows.slice(0, 3).forEach(a => popAlert(a));
+    } else {
+      rows.forEach(a => {
+        if (!seenAlertIds.has(a.id)) {
+          seenAlertIds.add(a.id);
+          popAlert(a);
+        }
+      });
+    }
   } catch(e) {}
 }
 
-$('bellBtn').addEventListener('click', () => switchPage('alerts'));
+$('bellBtn').addEventListener('click', () => {
+  requestNotificationPermission();
+  switchPage('alerts');
+});
 
 function populateAlertFilter(devices) {
   const sel = $('alertFilter');
@@ -969,6 +986,29 @@ function showToast(title, message, severity) {
   el.querySelector('.toast-close').addEventListener('click', close);
   // Auto-hide after 2 minutes so the notification clears itself
   setTimeout(close, TOAST_AUTO_DISMISS_MS);
+}
+
+// ---------- notifications ----------
+// One alert -> toast (top-right) + browser notification when the tab is hidden.
+let seenAlertIds = new Set();
+let initialToastShown = false;
+
+function popAlert(a) {
+  const title = a.device_name || ('Device ' + a.device_id);
+  const msg = a.message || (ALERT_LABELS[a.type] || a.type);
+  const sev = a.severity || 'warning';
+  showToast(esc(title), esc(msg), sev);
+  if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
+    try {
+      new Notification('⚠ ' + title, { body: msg, icon: '/static/icons/icon-192.png', tag: 'alert-' + a.id });
+    } catch (e) {}
+  }
+}
+
+function requestNotificationPermission() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission().catch(() => {});
+  }
 }
 
 // ---------- export ----------
@@ -1222,7 +1262,8 @@ socket.on('new_readings', () => {
 socket.on('new_alerts', (data) => {
   if (data && data.length > 0) {
     data.forEach(a => {
-      showToast(esc(a.device_name || ('Device ' + a.device_id)), a.message, a.severity);
+      seenAlertIds.add(a.id);
+      popAlert(a);
     });
     loadAlerts();
     loadSummary();
