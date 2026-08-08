@@ -502,6 +502,7 @@ $('backdrop').addEventListener('click', closeSidebar);
 
 // ---------- page nav ----------
 function switchPage(page) {
+  currentPage = page;
   qq('.sidebar a.nav').forEach(x => x.classList.remove('active'));
   const link = q(`.sidebar a.nav[data-page="${page}"]`);
   if (link) link.classList.add('active');
@@ -989,14 +990,18 @@ function showToast(title, message, severity) {
 }
 
 // ---------- notifications ----------
-// One alert -> toast (top-right) + browser notification when the tab is hidden.
+// Quiet by default: non-critical alerts only bump the bell badge on non-alerts
+// pages. Toasts/browser notifications fire only on the Alerts page or for
+// critical severity.
 let seenAlertIds = new Set();
 let initialToastShown = false;
+let currentPage = 'overview';
 
 function popAlert(a) {
+  const sev = a.severity || 'warning';
+  if (sev !== 'critical' && currentPage !== 'alerts') return;
   const title = a.device_name || ('Device ' + a.device_id);
   const msg = a.message || (ALERT_LABELS[a.type] || a.type);
-  const sev = a.severity || 'warning';
   showToast(esc(title), esc(msg), sev);
   if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
     try {
