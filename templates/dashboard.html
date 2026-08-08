@@ -58,6 +58,10 @@
     .topbar { display:flex; align-items:center; gap:12px; padding:12px 24px; background:var(--bg-2); border-bottom:1px solid var(--border); position:sticky; top:0; z-index:30; }
     .topbar h2 { font-size:1.15rem; }
     .topbar .spacer { flex:1; }
+    .bell-btn { position:relative; background:none; border:none; cursor:pointer; font-size:1.15rem; line-height:1; padding:6px; border-radius:8px; }
+    .bell-btn:hover { background:var(--bg-3); }
+    .bell-badge { position:absolute; top:-2px; right:-4px; min-width:17px; height:17px; padding:0 4px; background:var(--red); color:#fff; font-size:0.7rem; font-weight:700; line-height:17px; text-align:center; border-radius:9px; }
+    .bell-badge.pulse { animation:pulse 1.5s infinite; }
     .hamburger { display:none; background:none; border:1px solid var(--border); color:var(--text); border-radius:8px; padding:6px 10px; font-size:1rem; cursor:pointer; }
     .live-indicator { display:flex; align-items:center; gap:6px; font-size:0.8rem; color:var(--green); }
     .content { padding:24px; flex:1; overflow-y:auto; }
@@ -207,6 +211,10 @@
       <button class="hamburger" id="hamburger" aria-label="Menu">☰</button>
       <h2 id="pageTitle">Overview</h2>
       <div class="spacer"></div>
+      <button class="bell-btn" id="bellBtn" aria-label="Notifications" title="Alerts">
+        <span class="bell-icon">🔔</span>
+        <span class="bell-badge" id="bellBadge" hidden>0</span>
+      </button>
       <div class="live-indicator">
         <span style="width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 1.5s infinite;"></span>
         Live
@@ -877,9 +885,18 @@ async function refreshAlertCount() {
   try {
     const res = await fetch('/api/alerts?pending=true&limit=1000');
     const rows = await res.json();
-    updateIconBadge(rows.length);
+    const count = rows.length;
+    updateIconBadge(count);
+    const badge = $('bellBadge');
+    if (badge) {
+      badge.hidden = count === 0;
+      badge.textContent = count > 99 ? '99+' : String(count);
+      badge.classList.toggle('pulse', count > 0);
+    }
   } catch(e) {}
 }
+
+$('bellBtn').addEventListener('click', () => switchPage('alerts'));
 
 function populateAlertFilter(devices) {
   const sel = $('alertFilter');
@@ -1017,18 +1034,19 @@ async function updateIconBadge(count) {
   ctx.drawImage(img, 0, 0, 64, 64);
 
   const n = count > 99 ? '99+' : String(count);
+  // Badge peeks out of the top-right corner of the icon.
   ctx.beginPath();
-  ctx.arc(48, 48, 30, 0, Math.PI * 2);
+  ctx.arc(48, 16, 21, 0, Math.PI * 2);
   ctx.fillStyle = '#ef4444';
   ctx.fill();
   ctx.lineWidth = 3;
   ctx.strokeStyle = '#ffffff';
   ctx.stroke();
   ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 24px sans-serif';
+  ctx.font = 'bold 22px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(n, 48, 49);
+  ctx.fillText(n, 48, 17);
 
   iconLink.href = _iconCanvas.toDataURL('image/png');
   iconLink.setAttribute('data-badged', '1');
