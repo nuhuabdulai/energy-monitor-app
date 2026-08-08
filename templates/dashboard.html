@@ -41,8 +41,8 @@
       --shadow: rgba(15,23,42,0.1);
     }
     * { margin:0; padding:0; box-sizing:border-box; }
-    body { font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; transition:background 0.25s,color 0.25s; }
-    .app { display:flex; min-height:100vh; }
+    body { font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; min-height:100dvh; overflow-x:hidden; transition:background 0.25s,color 0.25s; }
+    .app { display:flex; min-height:100vh; min-height:100dvh; }
 
     /* Sidebar */
     .sidebar { width:230px; background:var(--bg-2); border-right:1px solid var(--border); padding:20px 0; flex-shrink:0; display:flex; flex-direction:column; transition:transform 0.25s; z-index:40; }
@@ -148,7 +148,7 @@
     /* Modal */
     .modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:100; align-items:center; justify-content:center; padding:16px; }
     .modal-backdrop.open { display:flex; }
-    .modal { background:var(--bg-2); border:1px solid var(--border); border-radius:14px; padding:24px; width:100%; max-width:420px; box-shadow:0 10px 40px var(--shadow); }
+    .modal { background:var(--bg-2); border:1px solid var(--border); border-radius:14px; padding:24px; width:100%; max-width:420px; max-height:90vh; overflow-y:auto; box-shadow:0 10px 40px var(--shadow); }
     .modal h3 { margin-bottom:16px; }
     .modal .form-group { margin-bottom:14px; }
     .modal label { display:block; font-size:0.82rem; color:var(--text-dim); margin-bottom:6px; }
@@ -180,12 +180,39 @@
       .content { padding:14px; }
       .stats { grid-template-columns:repeat(2,1fr); }
       .device-grid { grid-template-columns:1fr; }
-      .topbar { padding:10px 14px; }
+      .topbar { padding:10px 14px; gap:8px; }
+      .topbar h2 { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:0.95rem; }
       .toast-container { left:14px; right:14px; max-width:none; top:64px; }
       .overview-grid { grid-template-columns:1fr; }
+      .modal { padding:18px; }
+      .modal .form-row { flex-direction:column; align-items:stretch; }
+      .btn, .range-toggle button, .ack-btn { min-height:40px; }
+      #pageSettings .form-group { min-width:100% !important; }
+
+      /* Alerts table -> stacked cards */
+      #pageAlerts .table-wrap { overflow:visible; background:transparent; border:none; box-shadow:none; }
+      #pageAlerts .alert-table, #pageAlerts .alert-table thead,
+      #pageAlerts .alert-table tbody, #pageAlerts .alert-table tr,
+      #pageAlerts .alert-table td { display:block; }
+      #pageAlerts .alert-table thead { display:none; }
+      #pageAlerts .alert-table tr { background:var(--bg-2); border:1px solid var(--border); border-radius:10px; padding:12px 14px; margin-bottom:10px; }
+      #pageAlerts .alert-table td { border:none; padding:3px 0; font-size:0.85rem; display:flex; justify-content:space-between; gap:12px; }
+      #pageAlerts .alert-table td::before { content:attr(data-label); color:var(--text-faint); font-size:0.7rem; text-transform:uppercase; letter-spacing:0.5px; flex-shrink:0; padding-top:2px; }
+      #pageAlerts .alert-table td.alert-no-data { display:block; text-align:center; }
+      #pageAlerts .alert-table td.alert-no-data::before { content:none; }
+      #pageAlerts .alert-table td:last-child { display:block; border-top:1px solid var(--border); margin-top:6px; padding-top:10px; }
+      #pageAlerts .alert-table td:last-child::before { content:none; }
+      #pageAlerts .ack-btn { width:100%; }
+    }
+    @media (max-width:480px) {
+      .range-toggle { flex:1; }
+      .range-toggle button { flex:1; padding:12px 0; }
     }
     @media (max-width:420px) {
       .stats { grid-template-columns:1fr; }
+      .live-indicator { font-size:0; }
+      .device-toolbar { flex-direction:column; align-items:stretch; }
+      .device-toolbar .btn, .device-toolbar select { width:100%; }
     }
   </style>
 </head>
@@ -944,20 +971,20 @@ const ALERT_LABELS = {
 function renderAlerts(alerts) {
   const body = $('alertBody');
   if (alerts.length === 0) {
-    body.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text-faint);">No alerts</td></tr>';
+    body.innerHTML = '<tr><td colspan="8" class="alert-no-data" style="text-align:center;padding:24px;color:var(--text-faint);">No alerts</td></tr>';
     return;
   }
   body.innerHTML = alerts.map(a => {
     const sev = a.severity || 'warning';
     return `<tr>
-      <td style="color:var(--text-faint);font-size:0.78rem;white-space:nowrap;">${new Date(a.created_at).toLocaleString()}</td>
-      <td>${esc(a.device_name || 'Device '+a.device_id)}</td>
-      <td>${esc(ALERT_LABELS[a.type] || a.type)}</td>
-      <td>${a.value !== null && a.value !== undefined ? fnum(a.value, 1) : '--'}</td>
-      <td>${a.threshold !== null && a.threshold !== undefined ? fnum(a.threshold, 0) : '--'}</td>
-      <td>${esc(a.message)}</td>
-      <td><span class="severity-${sev}">${esc(sev)}</span></td>
-      <td>${a.acknowledged ? '<span style="color:var(--text-faint);">Acknowledged</span>' :
+      <td data-label="Time" style="color:var(--text-faint);font-size:0.78rem;white-space:nowrap;">${new Date(a.created_at).toLocaleString()}</td>
+      <td data-label="Device">${esc(a.device_name || 'Device '+a.device_id)}</td>
+      <td data-label="Type">${esc(ALERT_LABELS[a.type] || a.type)}</td>
+      <td data-label="Value">${a.value !== null && a.value !== undefined ? fnum(a.value, 1) : '--'}</td>
+      <td data-label="Threshold">${a.threshold !== null && a.threshold !== undefined ? fnum(a.threshold, 0) : '--'}</td>
+      <td data-label="Message">${esc(a.message)}</td>
+      <td data-label="Severity"><span class="severity-${sev}">${esc(sev)}</span></td>
+      <td data-label="Action">${a.acknowledged ? '<span style="color:var(--text-faint);">Acknowledged</span>' :
         `<button class="ack-btn" data-id="${a.id}">Acknowledge</button>`}</td>
     </tr>`;
   }).join('');

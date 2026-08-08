@@ -31,8 +31,8 @@
       --grey: #94a3b8;
     }
     * { margin:0; padding:0; box-sizing:border-box; }
-    body { font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; transition:background 0.25s,color 0.25s; }
-    .app { display:flex; min-height:100vh; }
+    body { font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; min-height:100dvh; overflow-x:hidden; transition:background 0.25s,color 0.25s; }
+    .app { display:flex; min-height:100vh; min-height:100dvh; }
     .sidebar { width:220px; background:var(--bg-2); border-right:1px solid var(--border); padding:20px 0; flex-shrink:0; display:flex; flex-direction:column; transition:transform 0.25s; z-index:40; }
     .sidebar h3 { padding:0 20px; font-size:1rem; color:#38bdf8; margin-bottom:20px; }
     .sidebar a { display:flex; align-items:center; gap:10px; padding:10px 20px; color:var(--text-dim); text-decoration:none; font-size:0.9rem; transition:all 0.15s; border-left:3px solid transparent; }
@@ -85,8 +85,16 @@
       .hamburger { display:inline-block; }
       .content { padding:14px; }
       .floorplan { grid-template-columns:repeat(2,1fr); }
+      .topbar { padding:10px 14px; gap:8px; }
+      .topbar h2 { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:0.95rem; }
     }
-    @media (max-width:420px) { .floorplan { grid-template-columns:1fr; } }
+    @media (max-width:480px) {
+      .floorplan { grid-template-columns:1fr; }
+      .room { min-height:110px; }
+    }
+    @media (max-width:420px) {
+      .live-indicator { font-size:0; }
+    }
   </style>
 </head>
 <body>
@@ -109,7 +117,7 @@
       <button class="hamburger" id="hamburger" aria-label="Menu">☰</button>
       <h2>Device Map</h2>
       <div class="spacer"></div>
-      <div style="display:flex;align-items:center;gap:6px;font-size:0.8rem;color:var(--green);">
+      <div class="live-indicator" style="display:flex;align-items:center;gap:6px;font-size:0.8rem;color:var(--green);">
         <span style="width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 1.5s infinite;"></span>
         Live
       </div>
