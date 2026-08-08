@@ -112,16 +112,120 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 socketio = SocketIO(app, async_mode='threading')
 CORS(app, origins=['http://127.0.0.1:5000', 'http://localhost:5000'])
 
+def _now():
+    """UTC timestamp in the same space-separated format SQLite's
+    datetime('now') produces, so alerts/users/devices store identical strings
+    on both SQLite and PostgreSQL backends."""
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+
+DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
+IS_PG = DATABASE_URL.startswith('postgres')
+
+class _PGConn:
+    """Adapter exposing a sqlite3-like connection API (execute/executescript/
+    commit/close returning keyed rows) over PostgreSQL. Converts sqlite '?'
+    placeholders to psycopg2 '%s' so the rest of the app is database-agnostic.
+    """
+    def __init__(self, conn):
+        self._conn = conn
+        from psycopg2.extras import RealDictCursor
+        self._cursor_factory = RealDictCursor
+
+    def execute(self, sql, params=None):
+        cur = self._conn.cursor(cursor_factory=self._cursor_factory)
+        if params is not None and isinstance(params, (tuple, list)) and '?' in sql:
+            # '?' -> '%s'; escape any other literal '%' so psycopg2 does not
+            # mistake it for a placeholder.
+            sql = sql.replace('?', '\x00PGPH\x00').replace('%', '%%').replace('\x00PGPH\x00', '%s')
+        cur.execute(sql, params if params is not None else ())
+        return cur
+
+    def executescript(self, script):
+        cur = self._conn.cursor()
+        cur.execute(script)
+        return cur
+
+    def commit(self):
+        return self._conn.commit()
+
+    def rollback(self):
+        return self._conn.rollback()
+
+    def close(self):
+        return self._conn.close()
+
+def _connect_pg():
+    import psycopg2
+    return _PGConn(psycopg2.connect(DATABASE_URL))
+
 def get_db():
+    if IS_PG:
+        return _connect_pg()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('PRAGMA foreign_keys=ON')
     return conn
 
-def init_db():
-    conn = get_db()
-    conn.executescript('''
+def _schema_ddl():
+    """Schema DDL valid for the active backend (SQLite or PostgreSQL)."""
+    if IS_PG:
+        return '''
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS devices (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            location TEXT NOT NULL,
+            device_type TEXT DEFAULT 'smart_meter',
+            is_active INTEGER DEFAULT 1,
+            power_threshold REAL,
+            voltage_min REAL,
+            voltage_max REAL,
+            current_max REAL,
+            temp_min REAL,
+            temp_max REAL,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS readings (
+            id SERIAL PRIMARY KEY,
+            device_id INTEGER NOT NULL,
+            voltage REAL,
+            current REAL,
+            power REAL,
+            energy REAL,
+            power_factor REAL,
+            frequency REAL,
+            temperature REAL,
+            humidity REAL,
+            timestamp TEXT,
+            FOREIGN KEY (device_id) REFERENCES devices(id)
+        );
+        CREATE TABLE IF NOT EXISTS alerts (
+            id SERIAL PRIMARY KEY,
+            device_id INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            parameter TEXT,
+            message TEXT NOT NULL,
+            severity TEXT DEFAULT 'warning',
+            acknowledged INTEGER DEFAULT 0,
+            created_at TEXT,
+            FOREIGN KEY (device_id) REFERENCES devices(id)
+        );
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_readings_device_time ON readings(device_id, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_readings_time ON readings(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_alerts_ack ON alerts(acknowledged, created_at);
+        '''
+    return '''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -175,21 +279,32 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_readings_device_time ON readings(device_id, timestamp);
         CREATE INDEX IF NOT EXISTS idx_readings_time ON readings(timestamp);
         CREATE INDEX IF NOT EXISTS idx_alerts_ack ON alerts(acknowledged, created_at);
-    ''')
+    '''
+
+def init_db():
+    conn = get_db()
+    conn.executescript(_schema_ddl())
     # Migration: add per-device threshold columns to existing devices tables
-    for col, coltype in ((THRESHOLD_COLS['power'], 'REAL'), (THRESHOLD_COLS['voltage_min'], 'REAL'),
-                         (THRESHOLD_COLS['voltage_max'], 'REAL'), (THRESHOLD_COLS['current'], 'REAL'),
-                         (THRESHOLD_COLS['temp_min'], 'REAL'), (THRESHOLD_COLS['temp_max'], 'REAL')):
-        try:
-            conn.execute(f'ALTER TABLE devices ADD COLUMN {col} {coltype}')
-        except sqlite3.OperationalError:
-            pass  # column already exists
-    # Migration: add value/threshold/parameter columns to existing alerts tables
-    for col, coltype in (('value', 'REAL'), ('threshold', 'REAL'), ('parameter', 'TEXT')):
-        try:
-            conn.execute(f'ALTER TABLE alerts ADD COLUMN {col} {coltype}')
-        except sqlite3.OperationalError:
-            pass  # column already exists
+    if IS_PG:
+        for col, coltype in ((THRESHOLD_COLS['power'], 'REAL'), (THRESHOLD_COLS['voltage_min'], 'REAL'),
+                             (THRESHOLD_COLS['voltage_max'], 'REAL'), (THRESHOLD_COLS['current'], 'REAL'),
+                             (THRESHOLD_COLS['temp_min'], 'REAL'), (THRESHOLD_COLS['temp_max'], 'REAL')):
+            conn.execute(f'ALTER TABLE devices ADD COLUMN IF NOT EXISTS {col} {coltype}')
+        for col, coltype in (('value', 'REAL'), ('threshold', 'REAL'), ('parameter', 'TEXT')):
+            conn.execute(f'ALTER TABLE alerts ADD COLUMN IF NOT EXISTS {col} {coltype}')
+    else:
+        for col, coltype in ((THRESHOLD_COLS['power'], 'REAL'), (THRESHOLD_COLS['voltage_min'], 'REAL'),
+                             (THRESHOLD_COLS['voltage_max'], 'REAL'), (THRESHOLD_COLS['current'], 'REAL'),
+                             (THRESHOLD_COLS['temp_min'], 'REAL'), (THRESHOLD_COLS['temp_max'], 'REAL')):
+            try:
+                conn.execute(f'ALTER TABLE devices ADD COLUMN {col} {coltype}')
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        for col, coltype in (('value', 'REAL'), ('threshold', 'REAL'), ('parameter', 'TEXT')):
+            try:
+                conn.execute(f'ALTER TABLE alerts ADD COLUMN {col} {coltype}')
+            except sqlite3.OperationalError:
+                pass  # column already exists
     # Seed global settings if empty
     if not conn.execute('SELECT 1 FROM settings LIMIT 1').fetchone():
         conn.execute('INSERT INTO settings (key, value) VALUES (?,?)', ('energy_rate', str(ENERGY_RATE_PER_KWH)))
@@ -222,7 +337,8 @@ def init_db():
             ('Rooftop Meter', 'Rooftop')
         ]
         for name, location in device_names:
-            conn.execute('INSERT INTO devices (name, location) VALUES (?, ?)', (name, location))
+            conn.execute('INSERT INTO devices (name, location, created_at) VALUES (?, ?, ?)',
+                         (name, location, _now()))
         conn.commit()
         now = datetime.now()
         for dev_id in range(1, 21):
@@ -453,11 +569,11 @@ def check_offline_devices(conn, now_ts):
                 "SELECT id FROM alerts WHERE device_id=? AND type='device_offline' AND acknowledged=0",
                 (did,)).fetchone()
             if not existing:
-                conn.execute('''INSERT INTO alerts (device_id, type, parameter, message, severity, value, threshold)
-                    VALUES (?,?,?,?,?,?,?)''',
+                conn.execute('''INSERT INTO alerts (device_id, type, parameter, message, severity, value, threshold, created_at)
+                    VALUES (?,?,?,?,?,?,?,?)''',
                     (did, 'device_offline', 'device',
                      f'Device {did} is offline — no reading for {OFFLINE_SECONDS}s',
-                     'critical', int((now_ts - last_seen).total_seconds()), OFFLINE_SECONDS))
+                     'critical', int((now_ts - last_seen).total_seconds()), OFFLINE_SECONDS, _now()))
                 changed = True
         elif last_seen:
             # Device is back online — auto-acknowledge any open offline alerts
@@ -557,8 +673,8 @@ def api_signup():
         conn.close()
         return jsonify({'error': 'Email already registered'}), 409
     pw_hash = generate_password_hash(password)
-    conn.execute('INSERT INTO users (name, email, password) VALUES (?,?,?)',
-                 (name, email, pw_hash))
+    conn.execute('INSERT INTO users (name, email, password, created_at) VALUES (?,?,?,?)',
+                 (name, email, pw_hash, _now()))
     conn.commit()
     user = conn.execute('SELECT id, name, email FROM users WHERE email=?', (email,)).fetchone()
     conn.close()
@@ -662,16 +778,27 @@ def api_device_create():
         return jsonify({'error': 'Device name is required'}), 400
     conn = get_db()
     thresholds = _parse_thresholds(data)
-    cur = conn.execute('''INSERT INTO devices (name, location, device_type, is_active,
-            power_threshold, voltage_min, voltage_max, current_max, temp_min, temp_max)
-        VALUES (?,?,?,?,?,?,?,?,?,?)''',
-        (name, location,
-         data.get('device_type', 'smart_meter'),
-         1 if data.get('is_active', True) else 0,
-         thresholds.get('power'), thresholds.get('voltage_min'), thresholds.get('voltage_max'),
-         thresholds.get('current'), thresholds.get('temp_min'), thresholds.get('temp_max')))
+    if IS_PG:
+        cur = conn.execute('''INSERT INTO devices (name, location, device_type, is_active,
+                power_threshold, voltage_min, voltage_max, current_max, temp_min, temp_max, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id''',
+            (name, location,
+             data.get('device_type', 'smart_meter'),
+             1 if data.get('is_active', True) else 0,
+             thresholds.get('power'), thresholds.get('voltage_min'), thresholds.get('voltage_max'),
+             thresholds.get('current'), thresholds.get('temp_min'), thresholds.get('temp_max'), _now()))
+        device_id = cur.fetchone()['id']
+    else:
+        cur = conn.execute('''INSERT INTO devices (name, location, device_type, is_active,
+                power_threshold, voltage_min, voltage_max, current_max, temp_min, temp_max, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+            (name, location,
+             data.get('device_type', 'smart_meter'),
+             1 if data.get('is_active', True) else 0,
+             thresholds.get('power'), thresholds.get('voltage_min'), thresholds.get('voltage_max'),
+             thresholds.get('current'), thresholds.get('temp_min'), thresholds.get('temp_max'), _now()))
+        device_id = cur.lastrowid
     conn.commit()
-    device_id = cur.lastrowid
     conn.close()
     logger.info('Device created: %s (%s)', name, location)
     return jsonify({'ok': True, 'id': device_id}), 201
@@ -771,12 +898,20 @@ def api_export_alerts():
     return _csv_response(rows, f'alerts_{hours}h.csv', fieldnames)
 
 def _bucket_expr(period):
-    """SQLite expression that buckets a reading timestamp into a report period."""
+    """Expression that buckets a reading timestamp into a report period.
+    Valid on both SQLite and PostgreSQL. Timestamps are stored as ISO strings,
+    so the date part is always substr(timestamp, 1, 10)."""
     if period == 'weekly':
+        if IS_PG:
+            # Most recent Sunday of the reading's date (ISO week: Mon=1..Sun=7).
+            # mod() instead of '%' so psycopg2's placeholder parsing stays clean.
+            return ("to_char(to_date(substr(timestamp,1,10), 'YYYY-MM-DD')"
+                    " - (mod(extract(isodow from to_date(substr(timestamp,1,10), 'YYYY-MM-DD'))::int + 6, 7))"
+                    " * interval '1 day', 'YYYY-MM-DD')")
         return "date(timestamp, 'weekday 0', '-6 days')"
     if period == 'monthly':
-        return "strftime('%Y-%m', timestamp)"
-    return "date(timestamp)"
+        return "substr(timestamp, 1, 7)"
+    return "substr(timestamp, 1, 10)"
 
 def _report_rows(conn, period, cutoff, rate):
     """Aggregated energy/cost per period, ready for both JSON and CSV use.
@@ -901,23 +1036,34 @@ def api_ingest_reading():
     if not device:
         conn.close()
         return jsonify({'error': 'Unknown device'}), 404
-    conn.execute('''INSERT INTO readings
-        (device_id, voltage, current, power, energy, power_factor, frequency, temperature, humidity, timestamp)
-        VALUES (?,?,?,?,?,?,?,?,?,?)''',
-        (device_id,
-         data.get('voltage'), data.get('current'), data.get('power'),
-         data.get('energy'), data.get('power_factor'), data.get('frequency'),
-         data.get('temperature'), data.get('humidity'),
-         data.get('timestamp', datetime.now().isoformat())))
+    if IS_PG:
+        cur = conn.execute('''INSERT INTO readings
+            (device_id, voltage, current, power, energy, power_factor, frequency, temperature, humidity, timestamp)
+            VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id''',
+            (device_id,
+             data.get('voltage'), data.get('current'), data.get('power'),
+             data.get('energy'), data.get('power_factor'), data.get('frequency'),
+             data.get('temperature'), data.get('humidity'),
+             data.get('timestamp', datetime.now().isoformat())))
+        last_id = cur.fetchone()['id']
+    else:
+        conn.execute('''INSERT INTO readings
+            (device_id, voltage, current, power, energy, power_factor, frequency, temperature, humidity, timestamp)
+            VALUES (?,?,?,?,?,?,?,?,?,?)''',
+            (device_id,
+             data.get('voltage'), data.get('current'), data.get('power'),
+             data.get('energy'), data.get('power_factor'), data.get('frequency'),
+             data.get('temperature'), data.get('humidity'),
+             data.get('timestamp', datetime.now().isoformat())))
     # Run the alert engine on the incoming reading using the device's thresholds
     thresholds = get_thresholds(device)
     for alert in evaluate_alerts(data.get('voltage'), data.get('current'),
                                  data.get('power'), data.get('temperature'), thresholds):
         if not alert_dedup_window(conn, device_id, alert['type']):
-            conn.execute('''INSERT INTO alerts (device_id, type, parameter, message, severity, value, threshold)
-                VALUES (?,?,?,?,?,?,?)''',
+            conn.execute('''INSERT INTO alerts (device_id, type, parameter, message, severity, value, threshold, created_at)
+                VALUES (?,?,?,?,?,?,?,?)''',
                 (device_id, alert['type'], alert['parameter'], alert['message'], alert['severity'],
-                 alert['value'], alert['threshold']))
+                 alert['value'], alert['threshold'], _now()))
             maybe_email_alert(conn, device['name'], alert)
     # ML-style anomaly detection: flag readings that deviate strongly from the
     # device's recent power baseline (rolling z-score)
@@ -928,13 +1074,14 @@ def api_ingest_reading():
     if power_val is not None:
         anomaly = detect_power_anomaly(device_id, power_val)
         if anomaly and not alert_dedup_window(conn, device_id, anomaly['type']):
-            conn.execute('''INSERT INTO alerts (device_id, type, parameter, message, severity, value, threshold)
-                VALUES (?,?,?,?,?,?,?)''',
+            conn.execute('''INSERT INTO alerts (device_id, type, parameter, message, severity, value, threshold, created_at)
+                VALUES (?,?,?,?,?,?,?,?)''',
                 (device_id, anomaly['type'], anomaly['parameter'], anomaly['message'], anomaly['severity'],
-                 anomaly['value'], anomaly['threshold']))
+                 anomaly['value'], anomaly['threshold'], _now()))
             maybe_email_alert(conn, device['name'], anomaly)
     conn.commit()
-    last_id = conn.execute('SELECT last_insert_rowid() as id').fetchone()['id']
+    if not IS_PG:
+        last_id = conn.execute('SELECT last_insert_rowid() as id').fetchone()['id']
     conn.close()
     last_device_seen[device_id] = datetime.now()
     return jsonify({'ok': True, 'reading_id': last_id}), 201
