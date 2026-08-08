@@ -873,6 +873,14 @@ async function loadAlerts() {
   } catch(e) {}
 }
 
+async function refreshAlertCount() {
+  try {
+    const res = await fetch('/api/alerts?pending=true&limit=1000');
+    const rows = await res.json();
+    updateIconBadge(rows.length);
+  } catch(e) {}
+}
+
 function populateAlertFilter(devices) {
   const sel = $('alertFilter');
   sel.innerHTML = '<option value="all">All Devices</option>' +
@@ -926,6 +934,7 @@ function renderAlerts(alerts) {
       });
       loadAlerts();
       loadSummary();
+      refreshAlertCount();
     });
   });
 }
@@ -959,7 +968,71 @@ $('ackAllBtn').addEventListener('click', async () => {
   await fetch('/api/alerts/acknowledge', { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
   loadAlerts();
   loadSummary();
+  refreshAlertCount();
 });
+
+// ---------- icon badge ----------
+// Shows the pending alert count as a red badge on the tab favicon and, when the
+// app is installed, on the PWA icon via the Badging API.
+const BASE_ICON_URL = '/static/icons/icon-192.png';
+let _iconCanvas = null;
+let _iconImage = null;
+
+async function _loadBaseIcon() {
+  if (_iconImage) return _iconImage;
+  _iconImage = await new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = BASE_ICON_URL;
+  });
+  return _iconImage;
+}
+
+async function updateIconBadge(count) {
+  try {
+    if (count > 0) await navigator.setAppBadge(count);
+    else await navigator.clearAppBadge();
+  } catch (e) {}
+
+  const iconLink = document.querySelector('link[rel=icon]');
+  if (!iconLink) return;
+  if (!count || count <= 0) {
+    if (iconLink.getAttribute('data-badged')) {
+      iconLink.href = BASE_ICON_URL;
+      iconLink.removeAttribute('data-badged');
+    }
+    return;
+  }
+
+  const img = await _loadBaseIcon();
+  if (!img) return;
+  if (!_iconCanvas) {
+    _iconCanvas = document.createElement('canvas');
+    _iconCanvas.width = 64;
+    _iconCanvas.height = 64;
+  }
+  const ctx = _iconCanvas.getContext('2d');
+  ctx.clearRect(0, 0, 64, 64);
+  ctx.drawImage(img, 0, 0, 64, 64);
+
+  const n = count > 99 ? '99+' : String(count);
+  ctx.beginPath();
+  ctx.arc(48, 48, 30, 0, Math.PI * 2);
+  ctx.fillStyle = '#ef4444';
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#ffffff';
+  ctx.stroke();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 24px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(n, 48, 49);
+
+  iconLink.href = _iconCanvas.toDataURL('image/png');
+  iconLink.setAttribute('data-badged', '1');
+}
 
 // ---------- settings ----------
 async function loadSettings() {
@@ -1135,6 +1208,7 @@ socket.on('new_alerts', (data) => {
     });
     loadAlerts();
     loadSummary();
+    refreshAlertCount();
   }
 });
 
@@ -1142,6 +1216,7 @@ socket.on('new_alerts', (data) => {
 loadSummary();
 loadDevices();
 loadAlerts();
+refreshAlertCount();
 loadChartData();
 loadTrend();
 loadReports();
@@ -1150,6 +1225,7 @@ loadSettings();
 
 setInterval(loadSummary, 10000);
 setInterval(loadAlerts, 15000);
+setInterval(refreshAlertCount, 15000);
 </script>
 <script>
 if ('serviceWorker' in navigator) {
