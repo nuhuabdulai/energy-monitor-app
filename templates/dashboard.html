@@ -990,23 +990,27 @@ function showToast(title, message, severity) {
 }
 
 // ---------- notifications ----------
-// Quiet by default: non-critical alerts only bump the bell badge on non-alerts
-// pages. Toasts/browser notifications fire only on the Alerts page or for
-// critical severity.
+// Quiet by default: on non-alerts pages alerts only bump the bell badge. Toasts
+// (and browser notifications) fire only while the Alerts page is open.
 let seenAlertIds = new Set();
 let initialToastShown = false;
 let currentPage = 'overview';
+let lastSysNotify = 0;
 
 function popAlert(a) {
+  if (currentPage !== 'alerts') return;
   const sev = a.severity || 'warning';
-  if (sev !== 'critical' && currentPage !== 'alerts') return;
   const title = a.device_name || ('Device ' + a.device_id);
   const msg = a.message || (ALERT_LABELS[a.type] || a.type);
   showToast(esc(title), esc(msg), sev);
   if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
-    try {
-      new Notification('⚠ ' + title, { body: msg, icon: '/static/icons/icon-192.png', tag: 'alert-' + a.id });
-    } catch (e) {}
+    const now = Date.now();
+    if (now - lastSysNotify > 30000) {
+      lastSysNotify = now;
+      try {
+        new Notification('⚠ ' + title, { body: msg, icon: '/static/icons/icon-192.png', tag: 'alert-' + a.id });
+      } catch (e) {}
+    }
   }
 }
 
